@@ -292,7 +292,10 @@ class PPOAgent(Agent):
             tmp = self.replay_memory.sample_sequence(
                     batch_size=hp["batch_size"], seq_len=hp["batch_seq_len"]
             )
-            tmp['hx_cx'] = np.moveaxis(tmp['hx_cx'][:,0], -2, 0) # ignore hiddens after the first before sending to GPU.
+
+            # ignore hiddens after the first before sending to GPU.
+            tmp['hx_cx'] = np.moveaxis(tmp['hx_cx'][:,0], -2, 0)
+            
             data = {k: torch.from_numpy(v).to(self.device) for k,v in tmp.items()}
             
             with torch.set_grad_enabled(True):
