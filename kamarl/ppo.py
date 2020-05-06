@@ -3,12 +3,14 @@ import torch
 import torch.nn as nn
 import numba
 
+import os
 from collections import defaultdict
 
 import gym
 
 from kamarl.modules import ConvNet, SeqLSTM, make_mlp, device_of
 from kamarl.buffers import RecurrentReplayMemory
+from kamarl.agent import Agent
 
 @numba.jit#(numba.float32[:](numba.float32[:], numba.float32))
 def discount(rewards, gamma):
@@ -133,7 +135,7 @@ class PPOLSTM(nn.Module):
 
 
 
-class PPOAgent(object):
+class PPOAgent(Agent):
     default_hyperparams = {
         'learning_rate': 3.e-4,
         'num_minibatches': 100,
@@ -149,6 +151,7 @@ class PPOAgent(object):
 
         "module_hyperparams": {}
     }
+    save_modules = ['ac', 'optimizer']
     def __init__(self, observation_space, action_space, hyperparams={}):
         
         self.hyperparams = {**self.default_hyperparams, **hyperparams}

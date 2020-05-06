@@ -3,6 +3,7 @@ import numpy as np
 import torch.nn as nn
 
 import datetime, time
+import types
 
 from kamarl.ppo import PPOAgent
 from kamarl.utils import find_cuda_device
@@ -13,25 +14,21 @@ from marlgrid.utils.video import GridRecorder
 
 
 class AgentWrapper(LearningAgent):
+    ''' This is a bit of a hack to directly expose the methods of a PPOAgent
+    that is also acting as a LearningAgent for Marlgrid.
+    '''
+
     def __init__(self, learner_kwargs, agent_hook):
         super().__init__(**learner_kwargs)
         self._agent = agent_hook(self.observation_space, self.action_space)
+        _agent_methods = [
+            a for a in dir(self._agent) 
+            if isinstance(getattr(self._agent, a), types.MethodType)
+            and not a.startswith('__')
+        ]
 
-    def set_device(self, dev):
-        self._agent.set_device(dev)
-
-    def action_step(self, obs):
-        return self._agent.action_step(obs)
-
-    def save_step(self, *values, **kwvalues):
-        return self._agent.save_step(*values, **kwvalues)
-
-    def start_episode(self):
-        return self._agent.start_episode()
-
-    def end_episode(self):
-        return self._agent.end_episode()
-
+        for m in _agent_methods:
+            setattr(self, m, getattr(self._agent, m))
 
 marlgrid_agent_kwargs = {
     'view_tile_size': 3,
@@ -42,17 +39,17 @@ agents = IndependentLearners(
     AgentWrapper(marlgrid_agent_kwargs, agent_hook=PPOAgent),
 )
 
+agents[0].save('~/test_model_save', force=True)
+
 # wbl = WandbLogger(name='ppo', project='ppo_test')
 wbl = None
 
-
-device = find_cuda_device('1080 Ti')
-# device = find_cuda_device('1070')
-
+# device = find_cuda_device('1080 Ti')
+device = find_cuda_device('1070')
 
 count_parameters = lambda mod: np.sum([np.prod(x.shape) for x in mod.parameters()])
 print(count_parameters(agents[0]._agent.ac))
-# exit()
+
 for agent in agents:
     agent.set_device(device)
 
@@ -68,15 +65,16 @@ grid_params = {
     'randomize_goal': True,
     'n_clutter': n_clutter
 }
-env = marl_envs.ClutteredMultiGrid(agents, **grid_params)
+# env = marl_envs.ClutteredMultiGrid(agents, **grid_params)
 
-# grid_params = {'grid_size': 20, 'max_steps': 50}
-# env = marl_envs.EmptyMultiGrid(agents, **grid_params)
+grid_params = {'grid_size': 8, 'max_steps': 50}
+env = marl_envs.EmptyMultiGrid(agents, **grid_params)
 
-
-# wbl.log_hyperparams({
-#     'env_name': env.__class__.__name__,
-#     'env_params': grid_params})
+if wbl is not None:
+wbl.log_hyperparams({
+    'env_name': env.__class__.__name__,
+    'env_params': grid_params,
+    'hparams': agents[0].hyperparams})
 
 env = GridRecorder(env)  # , render_kwargs = {'show_agent_views': False})
 
@@ -103,19 +101,12 @@ for ep_num in range(num_episodes):
                 action_array = agents.action_step(obs_array)
 
                 next_obs_array, reward_array, done_array, _ = env.step(action_array)
-                # if agent_total_rewards is None:
-                #     agent_total_rewards = 1 * reward_array
-                # else:
-                #     agent_total_rewards += reward_array
 
                 # any(transitions[2]) is competitive; the episode will end as soon as the first agent reaches the goal
                 # all(transitions[2]) is less competitive; all agents have a chance to obtain the goal before the timeout
                 done = all(done_array)
 
                 total_reward += reward_array.sum()
-                # Penalize agents that don't get a reward during the episode
-                # if done:
-                #     reward_array = reward_array - 1.0 * (agent_total_rewards == 0)
 
                 agents.save_step(obs_array, action_array, reward_array, done_array)
 
@@ -124,11 +115,9 @@ for ep_num in range(num_episodes):
                 ep_steps += 1
                 # env.render(show_agent_views=True)
 
-                # wbl.flush_values(step=True)
+                if wbl is not None:
+                    wbl.flush_values(step=True)
 
-
-            # Save the last step twice
-            # agents.save_step(obs_array, action_array, reward_array, done_array)
 
             ep_time = time.time() - ep_start_time
             if env.recording:
@@ -137,12 +126,7 @@ for ep_num in range(num_episodes):
                     render_frame_images=True,
                 )
 
-            # if ep_num>0 and ep_num%10==0:
-            #     pdb.set_trace()
-
             print(
                 f"Episode {ep_num: >5d}: {ep_steps: <4d} ticks | cum rew={total_reward: <4.1f} | fps={ep_steps/ep_time: >5.2f}"
             )
-            # for k, a in enumerate(agents):
-            #     print(f" > {k} ", ', '.join(str(x) for x in a.ep_act_hist))
                 
