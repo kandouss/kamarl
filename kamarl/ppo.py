@@ -179,8 +179,10 @@ class PPOAgent(Agent):
 
         self.reset_optimizer()
         self.reset_hidden()
+        self.reset_state()
         self.counts = defaultdict(int)
 
+    def reset_state(self):
         self.state = {
             'hx_cx': self.ac.empty_hidden(numpy=True),
             'val': 0,
@@ -295,7 +297,7 @@ class PPOAgent(Agent):
 
             # ignore hiddens after the first before sending to GPU.
             tmp['hx_cx'] = np.moveaxis(tmp['hx_cx'][:,0], -2, 0)
-            
+
             data = {k: torch.from_numpy(v).to(self.device) for k,v in tmp.items()}
             
             with torch.set_grad_enabled(True):
@@ -355,6 +357,7 @@ class PPOAgent(Agent):
     def start_episode(self):
         self.ep_act_hist = np.zeros(self.action_space.n,dtype='int')
         self.reset_hidden()
+        self.reset_state()
         self.last_val = None
         self.replay_memory.start_episode()
         self.was_active = True
