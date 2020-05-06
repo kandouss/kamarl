@@ -5,7 +5,6 @@ from collections import namedtuple, defaultdict
 import random
 import gc
 import numba
-import ujson
 import pickle
 import gym
 
