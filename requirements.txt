@@ -1,0 +1,6 @@
+torch>=1.5.0
+numpy>=1.18.3
+gym>=0.17.1
+tqdm
+numba>=0.48.0
+git+https://github.com/kandouss/marlgrid.git#egg=marlgrid
