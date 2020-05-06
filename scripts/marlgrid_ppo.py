@@ -72,10 +72,10 @@ grid_params = {'grid_size': 8, 'max_steps': 50}
 env = marl_envs.EmptyMultiGrid(agents, **grid_params)
 
 if wbl is not None:
-wbl.log_hyperparams({
-    'env_name': env.__class__.__name__,
-    'env_params': grid_params,
-    'hparams': agents[0].hyperparams})
+    wbl.log_hyperparams({
+        'env_name': env.__class__.__name__,
+        'env_params': grid_params,
+        'hparams': agents[0].hyperparams})
 
 env = GridRecorder(env)  # , render_kwargs = {'show_agent_views': False})
 
