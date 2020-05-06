@@ -254,16 +254,11 @@ class RecurrentReplayMemory:
         else:
             return res
 
-    # def index_of_space(self, key):
-    #     if self.spaces is None:
-    #         if key == 'hidden':
-    #             return -1
-
     # def sample_transitions(
     #     self, batch_size,
     # ):
     #     transitions = self.sample_sequence(batch_size, 2, collate=False)
-    #     return transitions[0], self.get_obs(transitions[1])
+    #     return {transitions[0]: 'next_obs':transitions[1].obs}
 
     # def update_hidden(self, hidden_hook, seq_len=1000, hidden_ix=4, return_err=False):
     #     errlist = []

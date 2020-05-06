@@ -10,35 +10,11 @@ from marlgrid.utils.video import GridRecorder
 import gym
 
 
-
-
 count_parameters = lambda mod: np.sum([np.prod(x.shape) for x in mod.parameters()])
-# exit()
-
-grid_size = 20
-clutter_density = 0.2
-max_steps = 300
-n_clutter = int(clutter_density * (grid_size-2)**2)
-
-grid_params = {
-    'grid_size': grid_size,
-    'max_steps': max_steps,
-    'seed': 1,
-    'randomize_goal': True,
-    'n_clutter': n_clutter
-}
 
 env = gym.make('Breakout-v0')
 
-# grid_params = {'grid_size': 20, 'max_steps': 50}
-# env = marl_envs.EmptyMultiGrid(agents, **grid_params)
-
-
-# wbl.log_hyperparams({
-#     'env_name': env.__class__.__name__,
-#     'env_params': grid_params})
-
-env = GridRecorder(env, max_len=10001)  # , render_kwargs = {'show_agent_views': False})
+env = GridRecorder(env, max_len=10001)
 
 agent = PPOAgent(env.observation_space, env.action_space, 
         hyperparams = {
@@ -52,12 +28,10 @@ agent = PPOAgent(env.observation_space, env.action_space,
             ]}
         })
 
-
 device = find_cuda_device('1080 Ti')
 
 print(count_parameters(agent.ac))
 agent.set_device(device)
-
 
 run_time = datetime.datetime.now().strftime("%m_%d_%H:%M:%S")
 

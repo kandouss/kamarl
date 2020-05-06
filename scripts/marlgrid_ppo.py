@@ -30,6 +30,7 @@ class AgentWrapper(LearningAgent):
         for m in _agent_methods:
             setattr(self, m, getattr(self._agent, m))
 
+
 marlgrid_agent_kwargs = {
     'view_tile_size': 3,
     'view_size': 7,
