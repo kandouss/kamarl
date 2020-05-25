@@ -143,6 +143,14 @@ class RecurrentReplayMemory:
     def start_episode(self):
         self.episodes.append(Episode(self.spaces, max_length=self.max_episode_length))
 
+    def get_new_episode(self):
+        return Episode(self.spaces, max_length=self.max_episode_length)
+
+    def add_episode(self, ep):
+        self.episodes.append(ep)
+        while self.full:
+            self.remove_an_episode()
+
     def remove_an_episode(self, cmp=None):
         if len(self.episodes) == 1:
             raise ValueError("Attempting to delete only episode, but only episode might be active!")

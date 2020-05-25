@@ -10,7 +10,7 @@ import gym
 
 from kamarl.modules import ConvNet, SeqLSTM, make_mlp, device_of
 from kamarl.buffers import RecurrentReplayMemory
-from kamarl.agent import Agent
+from kamarl.agents import Agent
 
 @numba.jit#(numba.float32[:](numba.float32[:], numba.float32))
 def discount(rewards, gamma):
@@ -63,6 +63,7 @@ class PPOLSTM(nn.Module):
 
         self.observation_space = observation_space
         self.action_space = action_space
+        self.action_space.n = 3
 
         trunk = []
 
@@ -127,38 +128,53 @@ class PPOLSTM(nn.Module):
         pi = torch.distributions.Categorical(logits=policy_logits)
         act = pi.sample()
         logp = pi.log_prob(act)
+        # print(X.shape)
 
         val = self.mlp_val(X)
 
         return act.cpu().numpy(), val, logp, torch.stack((X, hx))
 
-
-
+def parallel_repeat(value, n_parallel=None):
+    if n_parallel is None:
+        return value
+    if isinstance(value, torch.Tensor):
+        return torch.repeat_interleave(value[None,...], n_parallel, dim=0)
+    else:
+        return np.repeat(np.array(value)[None,...], n_parallel, axis=0)
 
 class PPOAgent(Agent):
     default_hyperparams = {
-        'learning_rate': 3.e-4,
-        'num_minibatches': 100,
+        'num_minibatches': 10,
+        "max_episode_length": 1000,
+        "batch_size": 25, # episodes
+        "minibatch_size": 256,
+        "minibatch_seq_len": 10,
 
-        "replay_memory_size": 500000,  # steps
+        'learning_rate': 3.e-4,
         "target_kl": 0.01,
-        "episodes_per_batch": 25,
-        "batch_size": 256,
-        "batch_seq_len": 10,
         "clamp_ratio": 0.2,
         "lambda":0.97,
         "gamma": 0.99,
+        'entropy_bonus_coef': 0.01,
+        'value_loss_coef': 0.5,
 
         "module_hyperparams": {}
     }
     save_modules = ['ac', 'optimizer']
-    def __init__(self, observation_space, action_space, hyperparams={}):
-        
+    def __init__(self, *args, hyperparams={}, **kwargs):
+        super().__init__(*args, **kwargs)
         self.hyperparams = {**self.default_hyperparams, **hyperparams}
-        self.observation_space = observation_space
-        self.action_space = action_space
-        self.ac = PPOLSTM(observation_space, action_space, hyperparams=self.hyperparams['module_hyperparams'])
+        # self.observation_space = observation_space
+        # self.action_space = action_space
+        self.ac = PPOLSTM(self.observation_space, self.action_space, hyperparams=self.hyperparams['module_hyperparams'])
         self.hyperparams['module_hyperparams'] = self.ac.hyperparams
+
+        self.track_gradients(self.ac)
+
+        self.metadata = {
+            **self.metadata,
+            'hyperparams': self.hyperparams
+        }
 
         self.replay_memory = RecurrentReplayMemory(
             {
@@ -172,15 +188,19 @@ class PPOAgent(Agent):
                 "logp": ((), "float32"),
                 "hx_cx": ((2, self.ac.lstm.hidden_size), "float32")
             },
-            max_episode_length=10000,
-            max_num_steps=self.hyperparams['replay_memory_size']
+            max_episode_length=self.hyperparams["max_episode_length"]+1,
+            max_num_steps=(self.hyperparams["max_episode_length"]+1) * (self.hyperparams['batch_size']+1)
         )
         self.device = torch.device('cpu')
+
+        self.n_parallel = None
 
         self.reset_optimizer()
         self.reset_hidden()
         self.reset_state()
         self.counts = defaultdict(int)
+        self.logged_lengths = []
+        self.logged_rewards = []
 
     def reset_state(self):
         self.state = {
@@ -190,9 +210,15 @@ class PPOAgent(Agent):
             'ret': 0,
             'logp': 0
         }
+        self.state = {
+            k:parallel_repeat(v, self.n_parallel)
+            for k, v in self.state.items()
+        }
 
     def reset_hidden(self):
-        self.hx_cx = self.ac.empty_hidden().to(self.device)
+        self.hx_cx = parallel_repeat(
+            self.ac.empty_hidden(), self.n_parallel
+            ).to(self.device)
 
     def log(self, *args, **kwargs):
         if getattr(self, 'logger', None) is None:
@@ -215,11 +241,18 @@ class PPOAgent(Agent):
 
     def action_step(self, X):
         last_hx_cx = self.hx_cx.detach().cpu().numpy()
-        a, v, logp, self.hx_cx = self.ac.step(X, self.hx_cx)
+        if self.n_parallel is not None:
+            if X.shape[0] != self.n_parallel:
+                raise ValueError(f"Expected {self.n_parallel} stacked observations; got {X.shape[0]}")
+            tmp = self.ac.step(X[:,None,...], self.hx_cx.unbind(-2))
+            a, v, logp, hx_cx = [x.squeeze() for x in tmp]
+            self.hx_cx = torch.stack(hx_cx.unbind(-2))
+        else:
+            a, v, logp, self.hx_cx = self.ac.step(X, self.hx_cx)
 
         self.state = {**self.state,
-            'val': v.cpu().numpy().item(),
-            'logp': logp.cpu().numpy().item(),
+            'val': v.cpu().numpy(),
+            'logp': logp.cpu().numpy(),
             'hx_cx': last_hx_cx
         }
 
@@ -236,8 +269,13 @@ class PPOAgent(Agent):
             'obs': obs, 'act': act, 'rew': rew, 'done': done,
             **self.state
         }
-        if not self.replay_memory.current_episode['done',-1]:
-            self.replay_memory.current_episode.append(save_dict)
+        if self.n_parallel is None:
+            self.active_episodes[0].append(save_dict)
+        else:
+            for i, ep in enumerate(self.active_episodes):
+                if not ep['done',-1]:
+                    # import pdb; pdb.set_trace()
+                    ep.append({k: v[i] for k,v in save_dict.items()})
 
     def calculate_advantages(self, episode, last_val=0):
         ''' Populate advantages and returns in an episode. '''
@@ -273,6 +311,10 @@ class PPOAgent(Agent):
         loss_val = (((v_theta.squeeze() - data['ret'])**2)*mask).mean()
 
         approx_kl = ((data['logp'] - logp)*mask).mean().item()
+
+        loss_ent = - pi.entropy().mean() * self.hyperparams['entropy_bonus_coef']
+        loss_val = loss_val * self.hyperparams['value_loss_coef']
+        # import pdb; pdb.set_trace()
         # import pdb; pdb.set_trace()
         ent = pi.entropy().mean().item()
         clipped = ratio.gt(1+clamp_ratio) | ratio.lt(1-clamp_ratio)
@@ -280,7 +322,7 @@ class PPOAgent(Agent):
         pi_info = dict(kl=approx_kl, ent=ent, cf=clipfrac)
 
         # import pdb; pdb.set_trace()
-        return loss_pi, loss_val, pi_info
+        return loss_pi, loss_val, loss_ent, pi_info
 
     def optimize(self):
         hp = self.hyperparams
@@ -289,10 +331,12 @@ class PPOAgent(Agent):
 
         pi_infos = []
         critic_losses = []
+        policy_losses = []
+        entropy_losses = []
         target_kl = self.hyperparams['target_kl']
         for i in range(hp['num_minibatches']):
             tmp = self.replay_memory.sample_sequence(
-                    batch_size=hp["batch_size"], seq_len=hp["batch_seq_len"]
+                    batch_size=hp["minibatch_size"], seq_len=hp["minibatch_seq_len"]
             )
 
             # ignore hiddens after the first before sending to GPU.
@@ -303,7 +347,7 @@ class PPOAgent(Agent):
             with torch.set_grad_enabled(True):
                 self.optimizer.zero_grad()
 
-                policy_loss, critic_loss, loss_metrics = self.compute_loss(data)
+                policy_loss, critic_loss, entropy_loss, loss_metrics = self.compute_loss(data)
 
                 kl = loss_metrics['kl']
                 if i>0 and kl > 1.5 * target_kl:
@@ -312,9 +356,11 @@ class PPOAgent(Agent):
 
                 
                 pi_infos.append(loss_metrics)
-                (policy_loss+critic_loss).backward()
+                (policy_loss+critic_loss+entropy_loss).backward()
 
                 critic_losses.append(critic_loss.detach().cpu().numpy())
+                policy_losses.append(policy_loss.detach().cpu().numpy())
+                entropy_losses.append(entropy_loss.detach().cpu().numpy())
 
                 self.optimizer.step()
 
@@ -327,20 +373,26 @@ class PPOAgent(Agent):
         log_data = {
                 'update_no': self.counts['updates'],
                 'ep_no': self.counts['episodes'],
+                'step_no': self.counts['steps'],
                 'mean_buffer_logp': np.mean([x.logp.mean() for x in self.replay_memory.episodes]),
                 'mean_critic_loss': np.mean(critic_losses),
+                'mean_policy_loss': np.mean(policy_losses),
+                'mean_entropy_loss': np.mean(entropy_losses),
                 'mean_val': mean_val,
                 'mean_pi_clip_frac': mean_clip_frac,
                 'kl_iters': kl_iters,
+                'mean_reward': np.mean(self.logged_rewards),
+                'mean_length': np.mean(self.logged_lengths)
             }
+        self.logged_rewards = []
+        self.logged_lengths = []
             
         self.log('update_data',
             log_data#, step=self.counts['updates']
         )
-
-        # import pdb; pdb.set_trace()
         
         print(f"Update {1+self.counts['updates']}")
+        print(f"     ({len(self.replay_memory.episodes)} episodes since last update)")
         print(f" > Total steps: {steps.sum()} - avg {steps.mean():.2f} for {len(steps)} eps.")
         print(f" > Mean logp: {np.mean([x.logp.mean() for x in self.replay_memory.episodes]):.2f}")
         print(f" > Mean reward: {np.array([x.rew.sum() for x in self.replay_memory.episodes]).mean():.2f}")
@@ -348,55 +400,54 @@ class PPOAgent(Agent):
         print(f" > Mean val {mean_val:.4f}")
         print(f" > Mean pi clip frac: {mean_clip_frac:.2f}")
 
-
-
-
         self.replay_memory.clear()
         self.counts['updates'] += 1
 
-    def start_episode(self):
+    def clear_memory(self):
+        self.replay_memory.clear()
+        self.last_update_episode = self.counts['episodes']
+
+    def start_episode(self, n_parallel=None):
+        self.n_parallel = n_parallel
         self.ep_act_hist = np.zeros(self.action_space.n,dtype='int')
         self.reset_hidden()
         self.reset_state()
         self.last_val = None
-        self.replay_memory.start_episode()
+
+        self.active_episodes = [
+            self.replay_memory.get_new_episode() for x in 
+            range(1 if self.n_parallel is None else self.n_parallel)
+        ]
+        # self.replay_memory.start_episode()
         self.was_active = True
         self.counts['episode_steps'] = 0
 
     def end_episode(self):
-        episode_reward = self.replay_memory.current_episode.rew.sum()
+        episode_reward = sum(e.rew for e in self.active_episodes)
         self.log(
             'episode_data',
             {
                 'ep_no': self.counts['episodes'],
-                'ep_len': len(self.replay_memory.current_episode),
+                'ep_len': np.mean([len(e) for e in self.active_episodes]),
                 'total_reward': episode_reward
             },
         )
 
-        LOG_INTERVAL=25
-        if (self.counts['episodes'] % LOG_INTERVAL) == 0:
-            if len(getattr(self, 'logged_rewards', [])) > 0:
-                self.log(f'ep_{LOG_INTERVAL}',
-                {
-                    'ep_no': self.counts['episodes'],
-                    'step_no': self.counts['steps'],
-                    'mean_reward': np.mean(self.logged_rewards),
-                    'lengths': self.logged_lengths,
-                    'mean_length': np.mean(self.logged_lengths)
-                })
-            self.logged_rewards = []
-            self.logged_lengths = []
-        self.logged_rewards.append(episode_reward)
-        self.logged_lengths.append(len(self.replay_memory.current_episode))
+        self.logged_rewards += [e.rew.sum() for e in self.active_episodes]
+        self.logged_lengths += [len(e) for e in self.active_episodes]
 
-        self.calculate_advantages(self.replay_memory.current_episode)
-        self.replay_memory.end_episode()
-
-
-        if self.counts['episodes']>0 and ((self.counts['episodes'] % self.hyperparams['episodes_per_batch'])==0):
-            self.optimize()
-
-        self.counts['episodes'] += 1
+        for ep in self.active_episodes:
+            self.calculate_advantages(ep)
+            ep.freeze()
+            self.replay_memory.add_episode(ep)
+        # self.replay_memory.end_episode()
+        self.counts['episodes'] += len(self.active_episodes)
         self.counts['episode_step'] = 0
 
+        # if self.counts['episodes']>0 and ((self.counts['episodes'] % self.hyperparams['batch_size'])==0):
+            # if self.counts['episodes'] - getattr(self, 'last_update_episode', 0) >= self.hyperparams['batch_size']:
+        if len(self.replay_memory.episodes) >= self.hyperparams['batch_size']:
+            self.optimize()
+            self.last_update_episode = self.counts['episodes']
+
+        self.grad_log_sync()
