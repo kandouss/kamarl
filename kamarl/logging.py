@@ -1,11 +1,14 @@
 import torch
-import wandb
 from collections import defaultdict
 import time
 import os
 import itertools
 import numpy as np
-from torch.utils.tensorboard import SummaryWriter
+import importlib
+
+def import_module(module_name):
+    globals()[module_name] = importlib.import_module(module_name)
+
 
 class Logger:
     def __init__(self, name, *args, key_path=[], **kwargs):
@@ -55,6 +58,7 @@ class Logger:
 
 class WandbLogger(Logger):
     def __init__(self, name, project, run_logger=None, key_path=[]):
+        import_module('wandb')
         assert isinstance(key_path, list)
         super().__init__(name, project=project, run_logger=run_logger, key_path=key_path)
         if run_logger is None:
@@ -67,7 +71,6 @@ class WandbLogger(Logger):
     def sync(self):
         self.run_logger.log()
 
-    
     def watch(self, module):
         module._log_hooks = []
 
@@ -111,6 +114,7 @@ class WandbLogger(Logger):
 
 class TensorboardLogger:
     def __init__(self, project, name='base', base_dir='/fast/tb_kamarl/'):
+        import_module('tensorboard')
         self.name = name
         if isinstance(project, str):
             self.key_path = []

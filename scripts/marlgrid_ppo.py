@@ -17,10 +17,42 @@ from marlgrid.utils.video import GridRecorder
 run_time = datetime.datetime.now().strftime("%m_%d_%H:%M:%S")
 device = find_cuda_device('1080 Ti')[0]
 
+agent_config = {
+    'view_tile_size': 3,
+    'view_size': 7,
+    'hyperparams': {
+
+        'num_minibatches': 100,
+        "episodes_per_batch": 512,
+        "batch_size": 250,
+        "batch_seq_len": 10,
+
+        'learning_rate': 3.e-4,
+        "target_kl": 0.01,
+        "clamp_ratio": 0.2,
+        "lambda":0.97,
+        "gamma": 0.99,
+        'entropy_bonus_coef': 0.01,
+        'value_loss_coef': 0.5,
+
+        "module_hyperparams": {
+            "conv_layers" : [
+                {'out_channels': 8, 'kernel_size': 3, 'stride': 3, 'padding': 0},
+                {'out_channels': 16, 'kernel_size': 3, 'stride': 1, 'padding': 1},
+                {'out_channels': 32, 'kernel_size': 3, 'stride': 1, 'padding': 1}
+            ],
+            'input_trunk_layers': [64,64],
+            'lstm_hidden_size': 128,
+            'val_mlp_layers': [64],
+            'pi_mlp_layers': [64]
+        }
+    }
+}
 marlgrid_agent_kwargs = {
     'view_tile_size': 3,
     'view_size': 7,
 }
+
 save_root = f'/fast/atari_ppo_test/{run_time}'
 
 agents = IndependentAgents(
@@ -82,7 +114,6 @@ for ep_num in range(num_episodes):
 
                 next_obs_array, reward_array, done_array, _ = env.step(action_array)
 
-                done = all(done_array)
 
                 total_reward += reward_array.sum()
                 ep_reward += reward_array.sum()
@@ -90,14 +121,12 @@ for ep_num in range(num_episodes):
                 agents.save_step(obs_array, action_array, reward_array, done_array)
 
                 obs_array = next_obs_array
+                done = all(done_array)
 
                 ep_steps += 1
                 total_steps += 1
                 # input()
                 env.render(show_agent_views=True)
-
-                if wbl is not None:
-                    wbl.flush_values(step=True)
 
 
             ep_time = time.time() - ep_start_time
