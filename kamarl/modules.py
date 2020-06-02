@@ -26,8 +26,10 @@ def make_mlp(layer_sizes, nonlinearity=nn.Tanh):
             layers.append(nonlinearity())
         layers.append(nn.Linear(last_size, size))
         last_size = size
-
-    return nn.Sequential(*layers)
+    if len(layers) > 0:
+        return nn.Sequential(*layers)
+    else:
+        return nn.Identity()
         
 
 class ImageReshape(nn.Module):

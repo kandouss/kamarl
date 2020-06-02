@@ -77,13 +77,14 @@ class PPOLSTM(nn.Module):
 
         in_channels = 3 # todo: infer number of image channels from observation space shape.
         conv_layers = []
-        for c in self.hyperparams['conv_layers']:
+        for k,c in enumerate(self.hyperparams['conv_layers']):
             conv_layers.append(nn.Conv2d(in_channels, **c))
-            conv_layers.append(nn.ReLU(inplace=True))
             in_channels = c['out_channels']
+            if k < len(self.hyperparams['conv_layers']) - 1:
+                conv_layers.append(nn.ReLU(inplace=True))
 
         self.conv_layers = ConvNet(
-            *conv_layers[:-1],
+            *conv_layers,
             image_size=input_image_shape
         )
         self.combined_input_layers = make_mlp([self.conv_layers.n + n_flat_inputs, *self.hyperparams['input_trunk_layers']], nn.Tanh)
@@ -91,7 +92,8 @@ class PPOLSTM(nn.Module):
         #     conv_layers,
         #     *make_mlp([conv_layers.n, *self.hyperparams['input_trunk_layers']], nn.Tanh)
         # )
-        self.lstm = SeqLSTM(self.combined_input_layers[-1].out_features, self.hyperparams['lstm_hidden_size'])
+        feature_count = getattr(self.combined_input_layers[-1], 'out_features', self.conv_layers.n+n_flat_inputs)
+        self.lstm = SeqLSTM(feature_count, self.hyperparams['lstm_hidden_size'])
         
         self.mlp_val = make_mlp(
             layer_sizes=[self.lstm.hidden_size, *self.hyperparams['val_mlp_layers'], 1],
@@ -277,6 +279,15 @@ class PPOAgent(Agent):
             self.device = torch.device(dev)
             self.hx_cx.to(self.device)
             self.ac.to(self.device)
+            tmp = self.optimizer.state_dict()
+            # self.optimizer.to(self.device)
+            self.reset_optimizer()
+            self.optimizer.load_state_dict(tmp)
+
+    # @classmethod
+    # def load(cls, *args, **kwargs):
+    #     ret = super().load(*args, **kwargs)
+    #     return ret
 
     def reset_optimizer(self):
         self.optimizer = torch.optim.Adam(
@@ -284,6 +295,7 @@ class PPOAgent(Agent):
             lr = self.hyperparams['learning_rate'])
 
     def action_step(self, X):
+        self.ac.eval()
         last_hx_cx = self.hx_cx.detach().cpu().numpy()
         if self.n_parallel is not None:
             # if X.shape[0] != self.n_parallel:
@@ -300,8 +312,8 @@ class PPOAgent(Agent):
             a, v, logp, self.hx_cx = self.ac.step(X, self.hx_cx)
 
         self.state = {**self.state,
-            'val': v.cpu().numpy(),
-            'logp': logp.cpu().numpy(),
+            'val': v.detach().cpu().numpy(),
+            'logp': logp.detach().cpu().numpy(),
             'hx_cx': last_hx_cx
         }
 
@@ -309,6 +321,7 @@ class PPOAgent(Agent):
         self.counts['episode_steps'] += 1
 
         return a
+
     def save_step(self, obs, act, rew, done):
         """ 
         Save an environment transition.
@@ -396,6 +409,7 @@ class PPOAgent(Agent):
         hp = self.hyperparams
         device = self.device
         self.normalize_advantages()
+        self.ac.train()
 
         pi_infos = []
         critic_losses = []
@@ -405,14 +419,9 @@ class PPOAgent(Agent):
         # import pdb; pdb.set_trace()
         tmi = defaultdict(list)
         for i in range(hp['num_minibatches']):
-            tmp, indices = self.replay_memory.sample_sequence(
-                    batch_size=hp["minibatch_size"], seq_len=hp["minibatch_seq_len"], return_indices=True
+            tmp = self.replay_memory.sample_sequence(
+                    batch_size=hp["minibatch_size"], seq_len=hp["minibatch_seq_len"], return_indices=False
             )
-            for k,v in tmp.items():
-                if k != 'hx_cx':
-                    tmi[k].append(v)
-            tmi['indices'].append(indices)
-
             # print("Mean obs reward:", (tmp['obs']['reward'] - tmp['rew']).mean())
 
             # ignore hiddens after the first before sending to GPU.
@@ -445,13 +454,6 @@ class PPOAgent(Agent):
 
                 self.optimizer.step()
 
-        tmi_dir = self.LOG_DIR
-        print("SAVING TOO MUCH INFORMATION... ")
-        print(f"  {tmi_dir} ...", end='')
-        pickle.dump(dict(tmi), open(os.path.join(tmi_dir, f'tmi_{self.counts["updates"]}.p'),'wb'))
-        del tmi
-        # import pdb; pdb.set_trace()
-        print("DONE!")
         ## Remainder of this method is informational!
         kl_iters = i
 
@@ -514,16 +516,17 @@ class PPOAgent(Agent):
         self.was_active = True
         self.counts['episode_steps'] = 0
 
-    def end_episode(self):
+    def end_episode(self, log=False):
         episode_reward = sum(e.rew for e in self.active_episodes)
-        self.log(
-            'episode_data',
-            {
-                'ep_no': self.counts['episodes'],
-                'ep_len': np.mean([len(e) for e in self.active_episodes]),
-                'total_reward': episode_reward,
-            },
-        )
+        if bool(log):
+            self.log(
+                'episode_data',
+                {
+                    'ep_no': self.counts['episodes'],
+                    'ep_len': np.mean([len(e) for e in self.active_episodes]),
+                    'total_reward': episode_reward,
+                },
+            )
 
         self.logged_rewards += [e.rew.sum() for e in self.active_episodes]
         self.logged_lengths += [len(e) for e in self.active_episodes]
