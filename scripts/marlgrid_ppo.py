@@ -15,7 +15,7 @@ from marlgrid.utils.video import GridRecorder
 
 
 run_time = datetime.datetime.now().strftime("%m_%d_%H:%M:%S")
-device = find_cuda_device('1080 Ti')[0]
+device = find_cuda_device('1080 Ti')
 
 marlgrid_agent_kwargs = {
     'view_tile_size': 3,

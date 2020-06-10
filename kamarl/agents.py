@@ -6,9 +6,14 @@ import types
 import gym
 from abc import ABC, abstractmethod, abstractproperty
 from kamarl.utils import space_to_dict, dict_to_space, combine_spaces
-from marlgrid.agents import InteractiveGridAgent
 from contextlib import contextmanager
+import warnings
 
+try:
+    from marlgrid.agents import InteractiveGridAgent
+except ImportError as e:
+    warnings.warn(f'{e}')
+    # raise ImportWarning(f'{e}')
 
 class RLAgentBase(ABC):
     @abstractproperty

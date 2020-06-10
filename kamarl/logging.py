@@ -1,11 +1,17 @@
 import torch
-import wandb
 from collections import defaultdict
 import time
 import os
 import itertools
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter
+import warnings
+
+try:
+    import wandb
+except ImportError as e:
+    warnings.warn(f'{e}')
+
 
 class Logger:
     def __init__(self, name, *args, key_path=[], **kwargs):

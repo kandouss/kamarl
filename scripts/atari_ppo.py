@@ -15,11 +15,11 @@ import gym
 run_time = datetime.datetime.now().strftime("%m_%d_%H:%M:%S")
 
 env = gym.make('Breakout-v0')
-save_root = =f'/fast/atari_ppo_test/{run_time}'
+save_root = f'/fast/atari_ppo_test/{run_time}'
 
 env = GridRecorder(
     env,
-    max_steps=10001,
+    max_steps=100001,
     save_root=save_root,
     auto_save_interval=500
 )
@@ -29,24 +29,25 @@ agent = PPOAgent(env.observation_space, env.action_space,
     hyperparams = {
         'learning_rate': 3.e-4,
         'num_minibatches': 100,
-        "minibatch_size": 64,
-        "episodes_per_batch": 25,
-
+        "minibatch_size": 256,
+        "batch_size": 10,
+        "max_episode_length": 100000,
+        'entropy_bonus_coef': 0.00,
         'module_hyperparams': {
             'conv_layers': [
-                {'out_channels': 1, 'kernel_size': 3, 'stride': 3, 'padding': 0},
-                {'out_channels': 8, 'kernel_size': 3, 'stride': 2, 'padding': 1},
-                {'out_channels': 16, 'kernel_size': 3, 'stride': 2, 'padding': 1},
-                {'out_channels': 32, 'kernel_size': 3, 'stride': 4, 'padding': 1},
+                {'out_channels': 3, 'kernel_size': 3, 'stride': 3, 'padding': 0},
+                {'out_channels': 8, 'kernel_size': 3, 'stride': 2, 'padding': 0},
+                {'out_channels': 16, 'kernel_size': 3, 'stride': 2, 'padding': 0},
+                {'out_channels': 32, 'kernel_size': 3, 'stride': 2, 'padding': 0},
         ]}
     }
 )
 
-device = find_cuda_device('1080 Ti')[0]
+device = torch.device('cpu')
+# device = find_cuda_device('1080 Ti')[0]
 # device = find_cuda_device('1070')
 
 print(count_parameters(agent.ac))
-
 
 # wbl = WandbLogger(name='atari_test', project='atari_ppo_test')
 # agent.set_logger(wbl)
