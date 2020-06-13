@@ -352,21 +352,6 @@ class RecurrentReplayMemory:
             return ret, np.array([to_sample, sample_start_ixs, end_ixs]).T
         else:
             return ret
-        #     print("WOOO")
-        #     import pdb; pdb.set_trace()
-        #     for k,v in episodes_to_sample[ep_ix][start_ix:end_ix].items():
-                
-        #         res[k].append(pad_to_length(v, seq_len))
-
-        # if collate:
-        #     res_before = res
-        #     res = {k: np.stack(v) for k,v in res.items()}
-        #     import pdb; pdb.set_trace()
-
-        # if return_indices:
-        #     return res, np.array([to_sample, sample_start_ixs, end_ixs]).T
-        # else:
-        #     return res
 
     # def sample_transitions(
     #     self, batch_size,
