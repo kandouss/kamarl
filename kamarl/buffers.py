@@ -21,13 +21,42 @@ def init_array(spec, length, array_hook=np.zeros):
     else:
         raise ValueError
 
+def init_array_recursive(spec, length, key_list = [], array_hook=np.zeros):
+    if not isinstance(length, (tuple, list)):
+        length = (length,)
+    if isinstance(spec, gym.spaces.Box):
+        return array_hook(shape=(*length, *spec.shape), dtype=spec.dtype), [key_list]
+    elif isinstance(spec, gym.spaces.Discrete):
+        return array_hook(shape=(*length,), dtype=np.dtype('int')), [key_list]
+    elif isinstance(spec, tuple):
+        shape, dtype = spec
+        return array_hook(shape=(*length, *shape), dtype=dtype), [key_list]
+    elif isinstance(spec, (dict, gym.spaces.Dict)):
+        if isinstance(spec, gym.spaces.Dict):
+            spec = spec.spaces
+        out = {}
+        leaf_keys = []
+        for k,v in spec.items():
+            out[k], tmp = init_array_recursive(v, length, [*key_list, k], array_hook=array_hook)
+            leaf_keys.extend(tuple(tmp))
+        return out, leaf_keys
+
+
+        
+        # return {
+        #     k: init_array_recursive(v, length, [], array_hook=array_hook)
+        #     for k,v in spec.items()
+        # }
+    else:
+        raise ValueError("Unsupported space {spec}.")
+
+
 class Episode:
     def __init__(self, spaces, max_length=1000):
         super().__init__()
         self.max_length = max_length
         self.length = 0
-        self.buffers = {k: init_array(v, length=max_length) for k,v in spaces.items()}
-        self.buffer_keys = list(self.buffers.keys())
+        self.buffers, self.flat_keys = init_array_recursive(spaces, length=max_length)
         self.frozen = False
 
     def __len__(self):
@@ -37,15 +66,38 @@ class Episode:
         return self.buffers[x][:self.length]
 
     def append(self, data):
+        if self.length >= self.max_length:
+            raise ValueError(f"Didn't allocate enough space in array. Trying to append step {self.length} to episode with size {self.max_length}.")
         if self.frozen:
             raise ValueError("Can't append to frozen episode.")
-        for k,v in data.items():
-            self.buffers[k][self.length] = v
+        for flat_key in self.flat_keys:
+            src = data
+            tgt = self.buffers
+            for key in flat_key[:-1]:
+                if key not in src:
+                    break
+                src = src[key]
+                tgt = tgt[key]
+            else:
+                if flat_key[-1] in src:
+                    try:
+                        tgt[flat_key[-1]][self.length] = src[flat_key[-1]]
+                    except:
+                        import pdb; pdb.set_trace()
+        # for k,v in data.items():
+        #     self.buffers[k][self.length] = v
         self.length += 1
 
+    def _iter_buffers(self):
+        for key_tuple in self.flat_keys:
+            ret = self.buffers
+            for k in key_tuple:
+                ret = ret[k]
+            yield ret
+
     def freeze(self):
-        for k,v in self.buffers.items():
-            v.resize((self.length, *v.shape[1:]), refcheck=False) # kinda sketchy
+        for buffer in self._iter_buffers():
+            buffer.resize((self.length, *buffer.shape[1:]), refcheck=False)
         self.frozen = True
 
     def _get_indices(self, ix):
@@ -57,33 +109,66 @@ class Episode:
             ind_keys, ind_steps = None, ix
         else:
             raise ValueError
+
         if ind_keys is None or ind_keys == slice(None):
-            ind_keys = self.buffer_keys
+            ind_keys = list(self.buffers.keys())
         if isinstance(ind_steps, slice):
             ind_steps = slice(*ind_steps.indices(self.length))
-
         return ind_keys, ind_steps
 
     def __getitem__(self, ix):
         ind_keys, ind_steps = self._get_indices(ix)
         if not isinstance(ind_keys, (list, tuple)):
-            return self.buffers[ind_keys][ind_steps]
+            ind_keys = [ind_keys]
+            return_dict = False
+        else:
+            return_dict = True
 
-        return {k: self.buffers[k][ind_steps] for k in ind_keys}
+        ret = {}#k: None for k in ind_keys}
+        for key_tuple in self.flat_keys:
+            if key_tuple[0] in ind_keys:
+                src = self.buffers
+                tgt = ret
+                for key in key_tuple[:-1]:
+                    tgt = tgt.setdefault(key, {})
+                    src = src[key]
+                tgt[key_tuple[-1]] = src[key_tuple[-1]][ind_steps]
+        
+        if return_dict is False:
+            return next(iter(ret.values()))
+
+        return ret
 
     def __setitem__(self, ix, val):
+        if isinstance(val, dict):
+            raise ValueError("Current implementation doesn't support dict assignment for values stored in episodes.")
         ind_keys, ind_steps = self._get_indices(ix)
         if not isinstance(ind_keys, (list, tuple)):
-            self.buffers[ind_keys][ind_steps] = val
-
+            ind_keys = [ind_keys]
+            return_dict = False
         else:
-            for k in ind_keys:
-                self.buffers[k][ind_steps] = val[k]
+            return_dict = True
 
-tmp = Episode({'hi': ((), 'float32'),
-'mom': ((3,2),'uint8')})
-for k in range(10):
-    tmp.append({'hi': k})
+        for key_tuple in self.flat_keys:
+            if key_tuple[0] in ind_keys:
+                tgt = self.buffers
+                for key in key_tuple[:-1]:
+                    tgt = tgt[key]
+                tgt[key_tuple[-1]][ind_steps] = val[ind_steps]
+                # import pdb; pdb.set_trace()
+        
+    # def __setitem__(self, ix, val):
+    #     ind_keys, ind_steps = self._get_indices(ix)
+    #     if not isinstance(ind_keys, (list, tuple)):
+    #         self.buffers[ind_keys][ind_steps] = val
+    #     else:
+    #         for k in ind_keys:
+    #             self.buffers[k][ind_steps] = val[k]
+
+# tmp = Episode({'hi': ((), 'float32'),
+# 'mom': ((3,2),'uint8')})
+# for k in range(10):
+#     tmp.append({'hi': k})
 
 def moving_average(a, n=3) :
     ret = np.cumsum(a, dtype=float)
@@ -91,11 +176,14 @@ def moving_average(a, n=3) :
     return ret[n - 1:] / n
 
 def pad_to_length(A, target_length, axis=0):
-    if target_length == A.shape[axis]:
-        return A
-    pad_width = [(0,0)]*len(A.shape)
-    pad_width[axis] = (0, int(target_length - A.shape[axis]))
-    return np.pad(A, pad_width=tuple(pad_width), mode='constant', constant_values=0)
+    if isinstance(A, dict):
+        return {k: pad_to_length(v, target_length=target_length, axis=axis) for k,v in A.items()}
+    else:
+        if target_length == A.shape[axis]:
+            return A
+        pad_width = [(0,0)]*len(A.shape)
+        pad_width[axis] = (0, int(target_length - A.shape[axis]))
+        return np.pad(A, pad_width=tuple(pad_width), mode='constant', constant_values=0)
 
 class RecurrentReplayMemory:
     def __init__(
@@ -197,7 +285,6 @@ class RecurrentReplayMemory:
         self,
         batch_size,
         seq_len,
-        collate=True,
         include_current=True,
         return_indices=False,
         equal_weight_episodes=False,
@@ -247,20 +334,24 @@ class RecurrentReplayMemory:
             ]
         end_ixs = []
 
-        res = defaultdict(list)
-        for ep_ix, start_ix in zip(to_sample, sample_start_ixs):
+        # res = defaultdict(list)
+        ret, ret_keys = init_array_recursive(self.spaces, (batch_size, seq_len))
+        for ix_in_batch, (ep_ix, start_ix) in enumerate(zip(to_sample, sample_start_ixs)):
             end_ix = min(start_ix + seq_len, len(episodes_to_sample[ep_ix]))
             end_ixs.append(end_ix)
-            for k,v in episodes_to_sample[ep_ix][start_ix:end_ix].items():
-                res[k].append(pad_to_length(v, seq_len))
-
-        if collate:
-            res = {k: np.stack(v) for k,v in res.items()}
-
+            tmp = episodes_to_sample[ep_ix][start_ix:end_ix]
+            for key_list in ret_keys:
+                src = tmp
+                tgt = ret
+                for k in key_list[:-1]:
+                    src = src[k]
+                    tgt = tgt[k]
+                tgt[key_list[-1]][ix_in_batch, :end_ix-start_ix, ...] = src[key_list[-1]]
+            
         if return_indices:
-            return res, np.array([to_sample, sample_start_ixs, end_ixs]).T
+            return ret, np.array([to_sample, sample_start_ixs, end_ixs]).T
         else:
-            return res
+            return ret
 
     # def sample_transitions(
     #     self, batch_size,

@@ -1,4 +1,4 @@
-import os
+import os, sys
 import json
 import torch
 import numpy as np
@@ -40,9 +40,9 @@ class RLAgentBase(ABC):
 class Agent(RLAgentBase):#(InteractiveGridAgent):
     save_modules = []
     def __init__(self, observation_space=None, action_space=None, grid_mode=True, logger=None, train_history=[], **kwargs):
-        kwargs = {k:v for k,v in kwargs.items() if k not in ['class']}
+        self.grid_agent_kwargs = {k:v for k,v in kwargs.items() if k not in ['class']}
         if grid_mode:
-            self.obj = InteractiveGridAgent(**kwargs)
+            self.obj = InteractiveGridAgent(**self.grid_agent_kwargs)
             self.observation_space = self.obj.observation_space
             self.action_space = self.obj.action_space
             self.metadata = {**self.obj.metadata}
@@ -62,7 +62,6 @@ class Agent(RLAgentBase):#(InteractiveGridAgent):
             'action_space': space_to_dict(self.action_space),
             'train_history': train_history
         }
-
 
     def track_gradients(self, module, log_frequency=10):
         # Weights and biases v. 0.8.32? was crashing when Kamal tried to log gradients using
@@ -211,13 +210,12 @@ class IndependentAgents(RLAgentBase):
 
     def save_step(self, obs, act, rew, done):
         
-        if isinstance(done, np.ndarray) and len(done.shape)<len(rew.shape):
-            done = np.array([done for _ in range(len(self.agents))])
-
-        try:
-            assert np.array(done).shape == np.array(rew).shape
-        except:
-            import pdb; pdb.set_trace()
+        if np.isscalar(done):
+            done = np.full(rew.shape, done, dtype='bool')
+        elif np.prod(rew.shape)/np.prod(done.shape) == len(self.agents):
+            done = (done * np.ones((len(self.agents),1))).astype(done.dtype)
+        else:
+            done.reshape(rew.shape)
 
         for k, agent in enumerate(self.agents):
             agent.save_step(obs[k], act[k], rew[k], done[k])

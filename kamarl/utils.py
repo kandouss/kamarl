@@ -11,29 +11,67 @@ def find_cuda_device(device_name=''):
     matching_cuda_devices = [dev for dev in cuda_devices if (device_name.lower() in torch.cuda.get_device_name(dev).lower())]
     return matching_cuda_devices
     
+
+def simplify_box_bounds(value):
+    if value is None:
+        return None
+    elif isinstance(value, np.ndarray):
+        first_value = next(value.flat).item()
+        if (value==first_value).all():
+            return first_value
+        else:
+            return value
+    else:
+        raise ValueError(f"Can't interpret box bound of type {type(value)} \n  > {value}")
+
 def space_to_dict(space):
-    if not isinstance(space, gym.spaces.Space):
-        raise ValueError
-
-    space_params = {k:getattr(space, k, v.default) for k,v in inspect.signature(space.__class__).parameters.items()}
     space_name = space.__class__.__name__
+    if isinstance(space, gym.spaces.Dict):
+        space_kwargs = {k: space_to_dict(subspace) for k,subspace in space.spaces.items()}
+    elif isinstance(space, gym.spaces.Tuple):
+        space_kwargs = {'spaces':[space_to_dict(subspace) for subspace in space.spaces]}
+    elif isinstance(space, gym.spaces.Box):
+        space_kwargs = {
+            'low': simplify_box_bounds(space.low),
+            'high': simplify_box_bounds(space.high),
+            'shape': tuple(space.shape),
+            'dtype': space.dtype.__str__(),
+        }
+    elif isinstance(space, gym.spaces.Discrete):
+        space_kwargs = {
+            'n': int(space.n)
+        }
+    else:
+        raise ValueError(f"Can't dict-encode gym space of type {space_name}")
 
-    for k in ['low','high']:
-        if isinstance(space_params.get(k,None), np.ndarray):
-            val = next(space_params[k].flat)
-            if (space_params[k] == val).all():
-                space_params[k] = val.item()
+    return {'type': space_name, 'kwargs':space_kwargs}
+    
+def dict_to_space(enc_space):
+    kwargs = enc_space['kwargs']
+    space_name = enc_space['type']
+    if space_name == 'Dict':
+        kwargs = {k: dict_to_space(v) for k,v in kwargs.items()}
+    elif space_name == 'Tuple':
+        kwargs = {'spaces': dict_to_space(v) for v in kwargs['spaces']}    
+    return getattr(gym.spaces, space_name)(**kwargs)
 
-    if 'dtype' in space_params:
-        space_params['dtype'] = space_params['dtype'].__str__()
+def get_module_inputs(observation_space):
+    '''
+    minigrid and marlgrid commonly return inputs that are either images or dictionaries.
+    This function returns the shapes of image inputs and the total number of scalar inputs from either input style.
+    '''
+    if isinstance(observation_space, gym.spaces.Box):
+        image_shape = observation_space.shape
+        n_flat_inputs = 0
+    elif isinstance(observation_space, gym.spaces.Dict):
+        image_shape = observation_space['pov'].shape
+        n_flat_inputs = gym.spaces.flatdim(gym.spaces.Tuple([v for k,v in observation_space.spaces.items() if k != 'pov']))
+    else:
+        raise ValueError(f"Can't figure out image/flat input sizes for space {observation_space}.")
+    return image_shape, n_flat_inputs
 
-    return {
-        'type': space_name,
-        'kwargs': space_params
-    }
+    
 
-def dict_to_space(space_dict):
-    return getattr(gym.spaces, space_dict['type'])(**space_dict['kwargs'])
 
 def combine_spaces(spaces):
     # if all(isinstance(space, gym.spaces.Discrete) for space in spaces):
@@ -51,10 +89,21 @@ class MultiParallelWrapper(gym.Wrapper):
         self.n_envs = n_envs
         self.n_agents = n_agents
 
+    def collate(self, agent_obs):
+        assert len(agent_obs) == self.n_envs
+        if isinstance(agent_obs[0], dict):
+            agent_obs = {k: np.stack([o[k] for o in agent_obs]) for k in agent_obs[0].keys()}
+        return agent_obs
+        
+
     def fix_obs(self, obs):
         if self.n_agents == obs.shape[1] and self.n_envs == obs.shape[0]:
-            return np.swapaxes(obs, 0, 1)
-        return obs
+            obs = np.swapaxes(obs, 0, 1)
+        return [self.collate(o) for o in obs]
+        
+        # print("Fixing obs.")
+        # import pdb; pdb.set_trace()
+        # return obs
 
     def fix_action(self, action):
         # print(f"ACTION SHAPE IS {np.array(action).shape}")
@@ -68,6 +117,8 @@ class MultiParallelWrapper(gym.Wrapper):
         if len(item.shape)>1:
             if self.n_agents != item.shape[0]:
                 return np.swapaxes(item, 0, 1)
+        else:
+            item = item[None,:]
         return item
     def step(self, action):
         o, r, d, i = self.env.step(self.fix_action(action))

@@ -1,16 +1,19 @@
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numba
 
 import os
 from collections import defaultdict
 
 import gym
+import pickle
 
 from kamarl.modules import ConvNet, SeqLSTM, make_mlp, device_of
 from kamarl.buffers import RecurrentReplayMemory
 from kamarl.agents import Agent
+from kamarl.utils import space_to_dict, dict_to_space, get_module_inputs
 
 @numba.jit#(numba.float32[:](numba.float32[:], numba.float32))
 def discount(rewards, gamma):
@@ -43,10 +46,10 @@ class PPOLSTM(nn.Module):
             action_space,
             hyperparams = {}
         ):
-        if not isinstance(observation_space, gym.spaces.Box):
-            raise ValueError(
-                f"{self.__class__.__name__} only supports box (image) observations"
-            )
+        # if not isinstance(observation_space, gym.spaces.Box):
+        #     raise ValueError(
+        #         f"{self.__class__.__name__} only supports box (image) observations"
+        #     )
         if not isinstance(action_space, gym.spaces.Discrete):
             raise ValueError(
                 f"{self.__class__.__name__} only supports discrete actions"
@@ -55,34 +58,42 @@ class PPOLSTM(nn.Module):
         self.hyperparams = {
             **self.default_hyperparams,
             **hyperparams,
-            'action_space': action_space.n,
-            'observation_space': observation_space.shape
+            'action_space': space_to_dict(action_space),
+            'observation_space': space_to_dict(observation_space)
         }
 
         super().__init__()
 
         self.observation_space = observation_space
         self.action_space = action_space
-        self.action_space.n = 3
+
+        input_image_shape, n_flat_inputs = get_module_inputs(self.observation_space)
+        if isinstance(self.observation_space, gym.spaces.Dict):
+            self.input_keys = [x for x in self.observation_space.spaces.keys() if x != 'pov']
+        else:
+            self.input_keys = []
 
         trunk = []
 
         in_channels = 3 # todo: infer number of image channels from observation space shape.
         conv_layers = []
-        for c in self.hyperparams['conv_layers']:
+        for k,c in enumerate(self.hyperparams['conv_layers']):
             conv_layers.append(nn.Conv2d(in_channels, **c))
-            conv_layers.append(nn.ReLU(inplace=True))
             in_channels = c['out_channels']
+            if k < len(self.hyperparams['conv_layers']) - 1:
+                conv_layers.append(nn.ReLU(inplace=True))
 
-        conv_layers = ConvNet(
-            *conv_layers[:-1],
-            image_size=observation_space.shape
+        self.conv_layers = ConvNet(
+            *conv_layers,
+            image_size=input_image_shape
         )
-        self.input_layers = nn.Sequential(
-            conv_layers,
-            *make_mlp([conv_layers.n, *self.hyperparams['input_trunk_layers']], nn.Tanh)
-        )
-        self.lstm = SeqLSTM(self.input_layers[-1].out_features, self.hyperparams['lstm_hidden_size'])
+        self.combined_input_layers = make_mlp([self.conv_layers.n + n_flat_inputs, *self.hyperparams['input_trunk_layers']], nn.Tanh)
+        # self.combined_input_layers = nn.Sequential(
+        #     conv_layers,
+        #     *make_mlp([conv_layers.n, *self.hyperparams['input_trunk_layers']], nn.Tanh)
+        # )
+        feature_count = getattr(self.combined_input_layers[-1], 'out_features', self.conv_layers.n+n_flat_inputs)
+        self.lstm = SeqLSTM(feature_count, self.hyperparams['lstm_hidden_size'])
         
         self.mlp_val = make_mlp(
             layer_sizes=[self.lstm.hidden_size, *self.hyperparams['val_mlp_layers'], 1],
@@ -103,26 +114,60 @@ class PPOLSTM(nn.Module):
                 dtype=torch.float32,
                 device=device_of(self))
 
+    def process_input(self, X):
+        if isinstance(self.observation_space, gym.spaces.Box):
+            return (X,torch.tensor((), device=device_of(self)))
+        elif isinstance(self.observation_space, gym.spaces.Dict):
+            batch_dims = X['pov'].shape[:-3] # dumb hack.
+            def expand_dims(X):
+                while len(X.shape) < len(batch_dims) + 1:
+                    X = X[..., None]
+                return X
+            try:
+                return (
+                    X['pov'], 
+                    torch.cat(tuple([
+                        (
+                            F.one_hot(torch.tensor(X[k]), self.observation_space[k].n).float() if isinstance(self.observation_space[k], gym.spaces.Discrete)
+                            else expand_dims(torch.tensor(X[k])).float()
+                        )
+                        for k in self.input_keys
+                    ]), dim=-1).to(device_of(self))
+                )
+            except KeyError:
+                import pdb; pdb.set_trace()
+        else:
+            raise ValueError(f"Can't process input of type {type(X)}")
+
     def pi(self, X, hx):
-        X = self.input_layers(X)
+        X_image, X_other = self.process_input(X)
+        X = torch.cat([self.conv_layers(X_image), X_other], dim=-1)
+        X = self.combined_input_layers(X)
         X, hx = self.lstm(X, hx, vec_hidden=False)
         pi = torch.distributions.Categorical(logits=self.mlp_pi(X))
         return pi
 
     def v(self, X, hx):
-        X = self.input_layers(X)
+        X_image, X_other = self.process_input(X)
+        X = torch.cat([self.conv_layers(X_image), X_other], dim=-1)
+        X = self.combined_input_layers(X)
         X, hx = self.lstm(X, hx, vec_hidden=False)
         return self.mlp_val(X)
 
     def pi_v(self, X, hx):
-        X = self.input_layers(X)
+        X_image, X_other = self.process_input(X)
+        X = torch.cat([self.conv_layers(X_image), X_other], dim=-1)
+        X = self.combined_input_layers(X)
         X, hx = self.lstm(X, hx, vec_hidden=False)
         pi = torch.distributions.Categorical(logits=self.mlp_pi(X))
         v = self.mlp_val(X)
         return pi, v
 
     def step(self, X, hx=None):
-        X = self.input_layers(X)
+        X_image, X_other = self.process_input(X)
+        X = torch.cat([self.conv_layers(X_image), X_other], dim=-1)
+        # import pdb; pdb.set_trace()
+        X = self.combined_input_layers(X)
         X, hx = self.lstm(X, hx, vec_hidden=False)
         policy_logits = self.mlp_pi(X)
         pi = torch.distributions.Categorical(logits=policy_logits)
@@ -155,7 +200,7 @@ class PPOAgent(Agent):
         "clamp_ratio": 0.2,
         "lambda":0.97,
         "gamma": 0.99,
-        'entropy_bonus_coef': 0.01,
+        'entropy_bonus_coef': 0.001,
         'value_loss_coef': 0.5,
 
         "module_hyperparams": {}
@@ -164,12 +209,12 @@ class PPOAgent(Agent):
     def __init__(self, *args, hyperparams={}, **kwargs):
         super().__init__(*args, **kwargs)
         self.hyperparams = {**self.default_hyperparams, **hyperparams}
-        # self.observation_space = observation_space
-        # self.action_space = action_space
+
         self.ac = PPOLSTM(self.observation_space, self.action_space, hyperparams=self.hyperparams['module_hyperparams'])
         self.hyperparams['module_hyperparams'] = self.ac.hyperparams
 
-        self.track_gradients(self.ac)
+        # self.track_gradients(self.ac)
+        self.training = True
 
         self.metadata = {
             **self.metadata,
@@ -201,6 +246,7 @@ class PPOAgent(Agent):
         self.counts = defaultdict(int)
         self.logged_lengths = []
         self.logged_rewards = []
+        self.logged_streaks = []
 
     def reset_state(self):
         self.state = {
@@ -233,6 +279,15 @@ class PPOAgent(Agent):
             self.device = torch.device(dev)
             self.hx_cx.to(self.device)
             self.ac.to(self.device)
+            tmp = self.optimizer.state_dict()
+            # self.optimizer.to(self.device)
+            self.reset_optimizer()
+            self.optimizer.load_state_dict(tmp)
+
+    # @classmethod
+    # def load(cls, *args, **kwargs):
+    #     ret = super().load(*args, **kwargs)
+    #     return ret
 
     def reset_optimizer(self):
         self.optimizer = torch.optim.Adam(
@@ -240,19 +295,25 @@ class PPOAgent(Agent):
             lr = self.hyperparams['learning_rate'])
 
     def action_step(self, X):
+        self.ac.eval()
         last_hx_cx = self.hx_cx.detach().cpu().numpy()
         if self.n_parallel is not None:
-            if X.shape[0] != self.n_parallel:
-                raise ValueError(f"Expected {self.n_parallel} stacked observations; got {X.shape[0]}")
-            tmp = self.ac.step(X[:,None,...], self.hx_cx.unbind(-2))
+            # if X.shape[0] != self.n_parallel:
+                # raise ValueError(f"Expected {self.n_parallel} stacked observations; got {X.shape[0]}")
+            # import pdb; pdb.set_trace()
+            if isinstance(X, dict):
+                X = {k:v[:,None,...] for k,v in X.items()}
+            else:
+                X = X[:,None,...]
+            tmp = self.ac.step(X, self.hx_cx.unbind(-2))
             a, v, logp, hx_cx = [x.squeeze() for x in tmp]
             self.hx_cx = torch.stack(hx_cx.unbind(-2))
         else:
             a, v, logp, self.hx_cx = self.ac.step(X, self.hx_cx)
 
         self.state = {**self.state,
-            'val': v.cpu().numpy(),
-            'logp': logp.cpu().numpy(),
+            'val': v.detach().cpu().numpy(),
+            'logp': logp.detach().cpu().numpy(),
             'hx_cx': last_hx_cx
         }
 
@@ -265,17 +326,39 @@ class PPOAgent(Agent):
         """ 
         Save an environment transition.
         """
+        if not bool(self.training):
+            return
+
+        def decollate(val, ix):
+            if isinstance(val, dict):
+                return {k: decollate(v, ix) for k,v in val.items()}
+            else:
+                return val[ix]
+
+        # Keep track of "streaks" of positive rewards.
+        rew_tmp = np.array(rew)
+        rew_streak = getattr(self, 'rew_streak', np.zeros_like(rew_tmp))
+        best_streak = getattr(self, 'best_streak', np.zeros_like(rew_tmp))
+        rew_streak = (rew_streak + 1.*(rew_tmp>0))*(rew_tmp>=0)
+        # if rew_streak.max()>0:
+        #     print("...",rew_streak)
+        self.best_streak = np.maximum(rew_streak, best_streak)
+        self.rew_streak = rew_streak
+        
+        
         save_dict = {
             'obs': obs, 'act': act, 'rew': rew, 'done': done,
             **self.state
         }
-        if self.n_parallel is None:
-            self.active_episodes[0].append(save_dict)
-        else:
-            for i, ep in enumerate(self.active_episodes):
-                if not ep['done',-1]:
-                    # import pdb; pdb.set_trace()
-                    ep.append({k: v[i] for k,v in save_dict.items()})
+        # if self.n_parallel is None:
+        #     self.active_episodes[0].append(save_dict)
+        # else:
+        for i, ep in enumerate(self.active_episodes):
+            if not ep['done',-1]:
+                if self.n_parallel is None:
+                    ep.append(save_dict)
+                else:
+                    ep.append({k: decollate(v,i) for k,v in save_dict.items()})
 
     def calculate_advantages(self, episode, last_val=0):
         ''' Populate advantages and returns in an episode. '''
@@ -327,23 +410,32 @@ class PPOAgent(Agent):
     def optimize(self):
         hp = self.hyperparams
         device = self.device
-        self.normalize_advantages()        
+        self.normalize_advantages()
+        self.ac.train()
 
         pi_infos = []
         critic_losses = []
         policy_losses = []
         entropy_losses = []
         target_kl = self.hyperparams['target_kl']
+        # import pdb; pdb.set_trace()
+        tmi = defaultdict(list)
         for i in range(hp['num_minibatches']):
             tmp = self.replay_memory.sample_sequence(
-                    batch_size=hp["minibatch_size"], seq_len=hp["minibatch_seq_len"]
+                    batch_size=hp["minibatch_size"], seq_len=hp["minibatch_seq_len"], return_indices=False
             )
+            # print("Mean obs reward:", (tmp['obs']['reward'] - tmp['rew']).mean())
 
             # ignore hiddens after the first before sending to GPU.
             tmp['hx_cx'] = np.moveaxis(tmp['hx_cx'][:,0], -2, 0)
-
-            data = {k: torch.from_numpy(v).to(self.device) for k,v in tmp.items()}
+            def to_tensor(x):
+                if isinstance(x, dict):
+                    return {k: to_tensor(v) for k,v in x.items()}
+                return torch.from_numpy(x).to(self.device)
             
+            data = to_tensor(tmp)
+            # data = {k: torch.from_numpy(v).to(self.device) for k,v in tmp.items()}
+            # assert data['obs']['reward'].max() == 0
             with torch.set_grad_enabled(True):
                 self.optimizer.zero_grad()
 
@@ -381,9 +473,12 @@ class PPOAgent(Agent):
                 'mean_val': mean_val,
                 'mean_pi_clip_frac': mean_clip_frac,
                 'kl_iters': kl_iters,
+                'mean_reward_streak': np.mean(self.logged_streaks),
+                'max_reward_streak': np.max(self.logged_streaks),
                 'mean_reward': np.mean(self.logged_rewards),
                 'mean_length': np.mean(self.logged_lengths)
             }
+        self.logged_streaks = []
         self.logged_rewards = []
         self.logged_lengths = []
             
@@ -399,6 +494,7 @@ class PPOAgent(Agent):
         print(f" > Mean critic loss: {np.mean(critic_losses):.2f}")
         print(f" > Mean val {mean_val:.4f}")
         print(f" > Mean pi clip frac: {mean_clip_frac:.2f}")
+
 
         self.replay_memory.clear()
         self.counts['updates'] += 1
@@ -422,19 +518,27 @@ class PPOAgent(Agent):
         self.was_active = True
         self.counts['episode_steps'] = 0
 
-    def end_episode(self):
+    def end_episode(self, log=False):
         episode_reward = sum(e.rew for e in self.active_episodes)
-        self.log(
-            'episode_data',
-            {
-                'ep_no': self.counts['episodes'],
-                'ep_len': np.mean([len(e) for e in self.active_episodes]),
-                'total_reward': episode_reward
-            },
-        )
+        if bool(log):
+            self.log(
+                'episode_data',
+                {
+                    'ep_no': self.counts['episodes'],
+                    'ep_len': np.mean([len(e) for e in self.active_episodes]),
+                    'total_reward': episode_reward,
+                },
+            )
 
         self.logged_rewards += [e.rew.sum() for e in self.active_episodes]
         self.logged_lengths += [len(e) for e in self.active_episodes]
+
+        self.logged_streaks += [self.best_streak]
+        # print(self.best_streak)
+        # self.best_streak *= 0
+        # self.rew_streak *= 0
+        del self.rew_streak
+        del self.best_streak
 
         for ep in self.active_episodes:
             self.calculate_advantages(ep)
@@ -446,7 +550,7 @@ class PPOAgent(Agent):
 
         # if self.counts['episodes']>0 and ((self.counts['episodes'] % self.hyperparams['batch_size'])==0):
             # if self.counts['episodes'] - getattr(self, 'last_update_episode', 0) >= self.hyperparams['batch_size']:
-        if len(self.replay_memory.episodes) >= self.hyperparams['batch_size']:
+        if bool(self.training) and len(self.replay_memory.episodes) >= self.hyperparams['batch_size']:
             self.optimize()
             self.last_update_episode = self.counts['episodes']
 
