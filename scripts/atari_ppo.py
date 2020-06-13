@@ -15,7 +15,7 @@ import gym
 run_time = datetime.datetime.now().strftime("%m_%d_%H:%M:%S")
 
 env = gym.make('Breakout-v0')
-save_root = =f'/fast/atari_ppo_test/{run_time}'
+save_root = f'/fast/atari_ppo_test/{run_time}'
 
 env = GridRecorder(
     env,
@@ -29,16 +29,23 @@ agent = PPOAgent(env.observation_space, env.action_space,
     hyperparams = {
         'learning_rate': 3.e-4,
         'num_minibatches': 100,
-        "minibatch_size": 64,
+        "minibatch_size": 512,
         "episodes_per_batch": 25,
+        'entropy_bonus_coef': 0.0,
+        "max_episode_length": 10000,
 
         'module_hyperparams': {
             'conv_layers': [
-                {'out_channels': 1, 'kernel_size': 3, 'stride': 3, 'padding': 0},
-                {'out_channels': 8, 'kernel_size': 3, 'stride': 2, 'padding': 1},
-                {'out_channels': 16, 'kernel_size': 3, 'stride': 2, 'padding': 1},
-                {'out_channels': 32, 'kernel_size': 3, 'stride': 4, 'padding': 1},
-        ]}
+                    {'out_channels': 1, 'kernel_size': 3, 'stride': 3, 'padding': 0},
+                    {'out_channels': 8, 'kernel_size': 3, 'stride': 2, 'padding': 0},
+                    {'out_channels': 16, 'kernel_size': 3, 'stride': 2, 'padding': 0},
+                    {'out_channels': 32, 'kernel_size': 3, 'stride': 2, 'padding': 0},
+            ],
+            'input_trunk_layers': [256],
+            'lstm_hidden_size': 256,
+            'val_mlp_layers': [128],
+            'pi_mlp_layers': [128],
+        }
     }
 )
 
@@ -52,7 +59,7 @@ print(count_parameters(agent.ac))
 # agent.set_logger(wbl)
 
 agent.set_device(device)
-
+import pdb; pdb.set_trace()
 total_reward = 0
 num_episodes = int(1e6)
 with torch.set_grad_enabled(False):

@@ -214,15 +214,10 @@ class IndependentAgents(RLAgentBase):
             done = np.full(rew.shape, done, dtype='bool')
         elif np.prod(rew.shape)/np.prod(done.shape) == len(self.agents):
             done = (done * np.ones((len(self.agents),1))).astype(done.dtype)
-
-        try:
-            assert np.array(done).shape == np.array(rew).shape
-        except:
-            import pdb; pdb.set_trace()
-
+        else:
+            done.reshape(rew.shape)
 
         for k, agent in enumerate(self.agents):
-            # print('.',end=''); sys.stdout.flush()
             agent.save_step(obs[k], act[k], rew[k], done[k])
 
     def start_episode(self, *args, **kwargs):

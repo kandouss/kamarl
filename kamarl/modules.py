@@ -111,51 +111,48 @@ class SeqLSTM(nn.RNNCellBase):
         super().__init__(input_size=input_size, hidden_size=hidden_size, bias=True, num_chunks=4)
 
     def forward(self, X, hx=None, vec_hidden=False):
-        try:
-            out_shape = (*X.shape[:-1], self.hidden_size)
-            while X.dim() < 3:
-                X = X.unsqueeze(0)
+        out_shape = (*X.shape[:-1], self.hidden_size)
+        while X.dim() < 3:
+            X = X.unsqueeze(0)
 
-            self.check_forward_input(X[:,0,:])
-            
-            ## TODO: remove duplicate code here.
-            if bool(vec_hidden):
-                if hx is None:
-                    hx = torch.zeros(2, X.size(0), X.size(1), self.hidden_size, dtype=X.dtype, device=X.device)
-                else:
-                    assert len(hx) == 2
-                    if isinstance(hx, tuple):
-                        hx = torch.stack(hx)
-
-                self.check_forward_hidden(X[:,0,:], hx[0][:,0,:], '[0]')
-                self.check_forward_hidden(X[:,0,:], hx[1][:,0,:], '[1]')
-
-                res = lstm_noseq_forward(
-                    X, hx,
-                    self.weight_ih, self.weight_hh,
-                    self.bias_ih, self.bias_hh,
-                )
+        self.check_forward_input(X[:,0,:])
+        
+        ## TODO: remove duplicate code here.
+        if bool(vec_hidden):
+            if hx is None:
+                hx = torch.zeros(2, X.size(0), X.size(1), self.hidden_size, dtype=X.dtype, device=X.device)
             else:
-                if hx is None:
-                    hx = torch.zeros(2, X.size(0), self.hidden_size, dtype=X.dtype, device=X.device)
-                else:
-                    assert len(hx) == 2
-                    if isinstance(hx, tuple):
-                        hx = torch.stack(hx)
-                    if hx.dim() == 2: # If the hidden state has no batch dimension, make one up
-                        hx = hx.unsqueeze(1)
-                    try:
-                        self.check_forward_hidden(X[:,0,:], hx[0], '[0]')
-                        self.check_forward_hidden(X[:,0,:], hx[1], '[1]')
-                    except:
-                        import pdb; pdb.set_trace()
+                assert len(hx) == 2
+                if isinstance(hx, tuple):
+                    hx = torch.stack(hx)
 
-                res = lstm_forward(
-                    X, hx,
-                    self.weight_ih, self.weight_hh,
-                    self.bias_ih, self.bias_hh,
-                )
+            self.check_forward_hidden(X[:,0,:], hx[0][:,0,:], '[0]')
+            self.check_forward_hidden(X[:,0,:], hx[1][:,0,:], '[1]')
 
-            return res.reshape((2, *out_shape))
-        except:
-            import pdb; pdb.set_trace()
+            res = lstm_noseq_forward(
+                X, hx,
+                self.weight_ih, self.weight_hh,
+                self.bias_ih, self.bias_hh,
+            )
+        else:
+            if hx is None:
+                hx = torch.zeros(2, X.size(0), self.hidden_size, dtype=X.dtype, device=X.device)
+            else:
+                assert len(hx) == 2
+                if isinstance(hx, tuple):
+                    hx = torch.stack(hx)
+                if hx.dim() == 2: # If the hidden state has no batch dimension, make one up
+                    hx = hx.unsqueeze(1)
+                try:
+                    self.check_forward_hidden(X[:,0,:], hx[0], '[0]')
+                    self.check_forward_hidden(X[:,0,:], hx[1], '[1]')
+                except:
+                    import pdb; pdb.set_trace()
+
+            res = lstm_forward(
+                X, hx,
+                self.weight_ih, self.weight_hh,
+                self.bias_ih, self.bias_hh,
+            )
+
+        return res.reshape((2, *out_shape))

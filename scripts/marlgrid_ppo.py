@@ -22,18 +22,18 @@ agent_config = {
     'view_size': 7,
     'hyperparams': {
 
-        'num_minibatches': 100,
-        "episodes_per_batch": 512,
-        "batch_size": 250,
-        "batch_seq_len": 10,
+        "batch_size": 10,
+        'num_minibatches': 80,
+        "minibatch_size": 512,
+        "minibatch_seq_len": 8,
 
-        'learning_rate': 3.e-4,
-        "target_kl": 0.01,
+        'learning_rate': 3.e-4, # 1.e-3, #
+        "target_kl":  0.01,
         "clamp_ratio": 0.2,
         "lambda":0.97,
         "gamma": 0.99,
-        'entropy_bonus_coef': 0.01,
-        'value_loss_coef': 0.5,
+        'entropy_bonus_coef': 0.0,#0001,
+        'value_loss_coef': 1.0,
 
         "module_hyperparams": {
             "conv_layers" : [
@@ -53,24 +53,25 @@ marlgrid_agent_kwargs = {
     'view_size': 7,
 }
 
-save_root = f'/fast/atari_ppo_test/{run_time}'
+save_root = f'/fast/marlgrid_ppo/{run_time}'
 
 agents = IndependentAgents(
-    PPOAgent(**marlgrid_agent_kwargs, color='red'),
-    PPOAgent(**marlgrid_agent_kwargs, color='blue'),
-    PPOAgent(**marlgrid_agent_kwargs, color='purple')
+    PPOAgent(**agent_config, color='prestige'),
+    # PPOAgent(**agent_config, color='blue'),
+    # PPOAgent(**agent_config, color='purple')
 )
 agents.set_device(device)
 print(count_parameters(agents.agents[0].ac))
 
 grid_params = {
-    'grid_size': 10,
-    'max_steps': 100,
+    'grid_size': 11,
+    'max_steps': 500,
     'seed': 1,
     'randomize_goal': True,
-    'clutter_density': 0.2,
+    'clutter_density': 0.3,
     'respawn': True,
     'ghost_mode': True,
+    'reward_decay': False,
 }
 env = marl_envs.ClutteredMultiGrid([agent.obj for agent in agents], **grid_params)
 
@@ -87,7 +88,7 @@ env = GridRecorder(
     env,
     max_steps=grid_params['max_steps']+1,
     save_root=save_root,
-    auto_save_interval=500
+    auto_save_interval=100
 )
 
 
@@ -105,11 +106,11 @@ for ep_num in range(num_episodes):
 
             ep_steps = 0
             ep_reward = 0
-            env.render(show_agent_views=True)
+            # env.render(show_agent_views=True)
             agent_total_rewards = None
             while not done:
                 # Get an action for each agent.
-                # action_array = [agent.action_space.sample() for agent]
+                # action_array = [agent.action_space.sample() for agent in agents]
                 action_array = agents.action_step(obs_array)
 
                 next_obs_array, reward_array, done_array, _ = env.step(action_array)
@@ -125,8 +126,8 @@ for ep_num in range(num_episodes):
 
                 ep_steps += 1
                 total_steps += 1
+                # env.render(show_agent_views=True)
                 # input()
-                env.render(show_agent_views=True)
 
 
             ep_time = time.time() - ep_start_time

@@ -200,7 +200,7 @@ class PPOAgent(Agent):
         "clamp_ratio": 0.2,
         "lambda":0.97,
         "gamma": 0.99,
-        'entropy_bonus_coef': 0.01,
+        'entropy_bonus_coef': 0.001,
         'value_loss_coef': 0.5,
 
         "module_hyperparams": {}
@@ -209,12 +209,12 @@ class PPOAgent(Agent):
     def __init__(self, *args, hyperparams={}, **kwargs):
         super().__init__(*args, **kwargs)
         self.hyperparams = {**self.default_hyperparams, **hyperparams}
-        # self.observation_space = observation_space
-        # self.action_space = action_space
+
         self.ac = PPOLSTM(self.observation_space, self.action_space, hyperparams=self.hyperparams['module_hyperparams'])
         self.hyperparams['module_hyperparams'] = self.ac.hyperparams
 
         # self.track_gradients(self.ac)
+        self.training = True
 
         self.metadata = {
             **self.metadata,
@@ -326,6 +326,8 @@ class PPOAgent(Agent):
         """ 
         Save an environment transition.
         """
+        if not bool(self.training):
+            return
 
         def decollate(val, ix):
             if isinstance(val, dict):
@@ -433,7 +435,7 @@ class PPOAgent(Agent):
             
             data = to_tensor(tmp)
             # data = {k: torch.from_numpy(v).to(self.device) for k,v in tmp.items()}
-            
+            # assert data['obs']['reward'].max() == 0
             with torch.set_grad_enabled(True):
                 self.optimizer.zero_grad()
 
@@ -533,6 +535,8 @@ class PPOAgent(Agent):
 
         self.logged_streaks += [self.best_streak]
         # print(self.best_streak)
+        # self.best_streak *= 0
+        # self.rew_streak *= 0
         del self.rew_streak
         del self.best_streak
 
@@ -546,7 +550,7 @@ class PPOAgent(Agent):
 
         # if self.counts['episodes']>0 and ((self.counts['episodes'] % self.hyperparams['batch_size'])==0):
             # if self.counts['episodes'] - getattr(self, 'last_update_episode', 0) >= self.hyperparams['batch_size']:
-        if len(self.replay_memory.episodes) >= self.hyperparams['batch_size']:
+        if bool(self.training) and len(self.replay_memory.episodes) >= self.hyperparams['batch_size']:
             self.optimize()
             self.last_update_episode = self.counts['episodes']
 
