@@ -48,10 +48,6 @@ agent_config = {
         }
     }
 }
-marlgrid_agent_kwargs = {
-    'view_tile_size': 3,
-    'view_size': 7,
-}
 
 save_root = f'/fast/marlgrid_ppo/{run_time}'
 
@@ -88,7 +84,7 @@ env = GridRecorder(
     env,
     max_steps=grid_params['max_steps']+1,
     save_root=save_root,
-    auto_save_interval=100
+    auto_save_interval=500
 )
 
 

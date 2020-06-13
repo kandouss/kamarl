@@ -30,9 +30,11 @@ agent = PPOAgent(env.observation_space, env.action_space,
         'learning_rate': 3.e-4,
         'num_minibatches': 100,
         "minibatch_size": 512,
-        "episodes_per_batch": 25,
+        'minibatch_seq_len': 8,
+        "batch_size": 25,
+
         'entropy_bonus_coef': 0.0,
-        "max_episode_length": 10000,
+        
 
         'module_hyperparams': {
             'conv_layers': [
@@ -59,7 +61,7 @@ print(count_parameters(agent.ac))
 # agent.set_logger(wbl)
 
 agent.set_device(device)
-import pdb; pdb.set_trace()
+
 total_reward = 0
 num_episodes = int(1e6)
 with torch.set_grad_enabled(False):
