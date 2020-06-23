@@ -18,7 +18,7 @@ def compare_modules(a, b):
 def device_of(mod):
     return next(mod.parameters()).device
 
-def make_mlp(layer_sizes, nonlinearity=nn.Tanh):
+def make_mlp(layer_sizes, nonlinearity=nn.Tanh, output_nonlinearity=None):
     layers = []
     last_size = layer_sizes[0]
     for k,size in enumerate(layer_sizes[1:]):
@@ -27,6 +27,8 @@ def make_mlp(layer_sizes, nonlinearity=nn.Tanh):
         layers.append(nn.Linear(last_size, size))
         last_size = size
     if len(layers) > 0:
+        if output_nonlinearity is not None:
+            layers.append(output_nonlinearity())
         return nn.Sequential(*layers)
     else:
         return nn.Identity()
@@ -47,7 +49,10 @@ class ImageReshape(nn.Module):
         if X.shape[-1] == 3:
             X = X.permute(*range(extra_dims), *(np.array([2, 0, 1]) + extra_dims))
         if self.rescale:
-            return X / 255.0
+            try:
+                return X / 255.0
+            except:
+                import pdb; pdb.set_trace()
         return X
 
 class ConvNet(nn.Module):
@@ -56,12 +61,16 @@ class ConvNet(nn.Module):
      - Flattens images after convolutions
     This makes it somewhat easier to chain convolutions and layers that expect flat inputs.
     """
-    def __init__(self, *modules, image_size=(64, 64, 3)):
+    def __init__(self, *modules, image_size=(64, 64, 3), output_nonlinearity=None):
         super().__init__()
         self.mods = nn.Sequential(ImageReshape(), *modules)
         self.n = int(
             np.prod(self.mods(torch.zeros(1, *image_size, dtype=torch.float32)).shape)
         )
+        if output_nonlinearity is not None:
+            self.output_nonlinearity = output_nonlinearity()
+        else:
+            self.output_nonlinearity = None
 
     def forward(self, X):
         if isinstance(X, np.ndarray):
@@ -75,7 +84,11 @@ class ConvNet(nn.Module):
         else:
             X = self.mods(X)
 
-        return X.reshape(*extra_dims, self.n)
+        X = X.reshape(*extra_dims, self.n)
+        if self.output_nonlinearity is not None:
+            return self.output_nonlinearity(X)
+        else:
+            return X
 
 
 @torch.jit.script
@@ -156,3 +169,50 @@ class SeqLSTM(nn.RNNCellBase):
             )
 
         return res.reshape((2, *out_shape))
+
+
+@torch.jit.script
+def lstm2_forward(X, hx, weight_ih, weight_hh, bias_ih, bias_hh):
+    for k, x in enumerate(X.unbind(-2)):
+        hx = torch.stack(torch._VF.lstm_cell( x, hx.unbind(-2),
+                            weight_ih, weight_hh, bias_ih, bias_hh),
+                            -2)
+    return hx
+
+class LSTM2(nn.RNNCellBase):
+    def __init__(self, input_size, hidden_size):
+        super().__init__(input_size=input_size, hidden_size=hidden_size, bias=True, num_chunks=4)
+
+    def hidden_for(self, X, hx=None):
+        if hx is None:
+            return torch.zeros((X.size(0), 2, self.hidden_size), dtype=X.dtype, device=X.device)
+        elif isinstance(hx, tuple):
+            hx = torch.stack(hx, -2)
+        return hx
+
+    def get_hidden(self, X, hx=None):
+        out_shape = tuple([2]+list(X.shape[:-2])+[self.hidden_size])
+        while X.dim() < 3:
+            X = X.unsqueeze(0)
+        hx = self.hidden_for(X, hx)
+        res = lstm2_forward( X, hx,
+            self.weight_ih, self.weight_hh,
+            self.bias_ih, self.bias_hh)
+        return res.reshape(out_shape)
+
+
+    def forward(self, X, hx=None):
+        out_shape = (2, *X.shape[:-1], self.hidden_size)
+        while X.dim() < 3:
+            X = X.unsqueeze(0)
+        hx = self.hidden_for(X, hx)
+        if hx.dim() == 2:
+            hx = hx.unsqueeze(-2)
+        
+        # import pdb; pdb.set_trace()
+        res = lstm_forward(
+            X, hx,
+            self.weight_ih, self.weight_hh,
+            self.bias_ih, self.bias_hh,
+        )
+        return res.reshape(*out_shape)

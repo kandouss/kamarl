@@ -2,6 +2,21 @@ import torch
 import numpy as np
 import gym
 import inspect
+import itertools
+import numba
+
+
+@numba.jit#(numba.float32[:](numba.float32[:], numba.float32))
+def discount_rewards(rewards, gamma):
+    discounted_rewards = 0*rewards
+    c0 = 0.0
+    ix = len(rewards)-1
+    for x in rewards[::-1]:
+        c0 = x + gamma * c0
+        discounted_rewards[ix] = c0
+        ix -= 1
+    return discounted_rewards
+
 
 def count_parameters(mod):
     return np.sum([np.prod(x.shape) for x in mod.parameters()])
@@ -11,6 +26,14 @@ def find_cuda_device(device_name=''):
     matching_cuda_devices = [dev for dev in cuda_devices if (device_name.lower() in torch.cuda.get_device_name(dev).lower())]
     return matching_cuda_devices
     
+
+def chunked_iterable(iterable, size):
+    it = iter(iterable)
+    while True:
+        chunk = tuple(itertools.islice(it, size))
+        if not chunk:
+            break
+        yield chunk
 
 def simplify_box_bounds(value):
     if value is None:

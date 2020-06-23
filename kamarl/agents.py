@@ -175,8 +175,16 @@ class Agent(RLAgentBase):#(InteractiveGridAgent):
         ret = cls(**metadata)
 
         modules_dict = torch.load(model_path)
+        
         for k,v in modules_dict.items():
-            getattr(ret, k).load_state_dict(v.state_dict())
+            try:
+                getattr(ret, k).load_state_dict(v.state_dict())
+            except:
+                rsd = getattr(ret, k).state_dict()
+                for net_name, net_params in v.state_dict().items():
+                    print(net_name, tuple(net_params.shape), tuple(rsd[net_name].shape))
+                print(f"Error loading {k}")
+                import pdb; pdb.set_trace()
         del modules_dict
         return ret
 

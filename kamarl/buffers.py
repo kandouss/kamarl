@@ -7,12 +7,21 @@ import gc
 import numba
 import pickle
 import gym
+import itertools
+
+def chunked_iterable(iterable, size):
+    it = iter(iterable)
+    while True:
+        chunk = tuple(itertools.islice(it, size))
+        if not chunk:
+            break
+        yield chunk
 
 def init_array(spec, length, array_hook=np.zeros):
     if isinstance(spec, gym.spaces.Box):
         return array_hook(shape=(length, *spec.shape), dtype=spec.dtype)
     elif isinstance(spec, gym.spaces.Discrete):
-        return array_hook(shape=(length,), dtype=np.dtype('int'))
+        return array_hook(shape=(length,), dtype=np.int)
     elif isinstance(spec, gym.Space):
         raise ValueError("Unsupported gym space.")
     elif isinstance(spec, tuple):
@@ -21,16 +30,22 @@ def init_array(spec, length, array_hook=np.zeros):
     else:
         raise ValueError
 
-def init_array_recursive(spec, length, key_list = [], array_hook=np.zeros):
+def init_array_recursive(spec, length, key_list = [], array_hook=np.zeros, array_kwargs = {}):
+    def dtype_fun(d):
+        if array_hook in (torch.zeros,):
+            return getattr(torch, np.dtype(d).name)
+        else:
+            return d
+
     if not isinstance(length, (tuple, list)):
         length = (length,)
     if isinstance(spec, gym.spaces.Box):
-        return array_hook(shape=(*length, *spec.shape), dtype=spec.dtype), [key_list]
+        return array_hook((*length, *spec.shape), dtype=dtype_fun(spec.dtype), **array_kwargs), [key_list]
     elif isinstance(spec, gym.spaces.Discrete):
-        return array_hook(shape=(*length,), dtype=np.dtype('int')), [key_list]
+        return array_hook((*length,), dtype=dtype_fun(np.dtype('int')), **array_kwargs), [key_list]
     elif isinstance(spec, tuple):
         shape, dtype = spec
-        return array_hook(shape=(*length, *shape), dtype=dtype), [key_list]
+        return array_hook((*length, *shape), dtype=dtype_fun(dtype), **array_kwargs), [key_list]
     elif isinstance(spec, (dict, gym.spaces.Dict)):
         if isinstance(spec, gym.spaces.Dict):
             spec = spec.spaces
@@ -41,12 +56,6 @@ def init_array_recursive(spec, length, key_list = [], array_hook=np.zeros):
             leaf_keys.extend(tuple(tmp))
         return out, leaf_keys
 
-
-        
-        # return {
-        #     k: init_array_recursive(v, length, [], array_hook=array_hook)
-        #     for k,v in spec.items()
-        # }
     else:
         raise ValueError("Unsupported space {spec}.")
 
@@ -58,6 +67,8 @@ class Episode:
         self.length = 0
         self.buffers, self.flat_keys = init_array_recursive(spaces, length=max_length)
         self.frozen = False
+        self.tensor_mode = False
+        self.tensor_device = None
 
     def __len__(self):
         return self.length
@@ -94,6 +105,17 @@ class Episode:
             for k in key_tuple:
                 ret = ret[k]
             yield ret
+
+    def to_tensor(self, device):
+        for key_tuple in self.flat_keys:
+            ret = self.buffers
+            for k in key_tuple[:-1]:
+                ret = ret[k]
+            ret[key_tuple[-1]] = torch.from_numpy(ret[key_tuple[-1]]).to(device=device)
+        self.tensor_mode = True
+        self.tensor_device = device
+        return self
+        
 
     def freeze(self):
         for buffer in self._iter_buffers():
@@ -155,20 +177,6 @@ class Episode:
                 for key in key_tuple[:-1]:
                     tgt = tgt[key]
                 tgt[key_tuple[-1]][ind_steps] = val[ind_steps]
-                # import pdb; pdb.set_trace()
-        
-    # def __setitem__(self, ix, val):
-    #     ind_keys, ind_steps = self._get_indices(ix)
-    #     if not isinstance(ind_keys, (list, tuple)):
-    #         self.buffers[ind_keys][ind_steps] = val
-    #     else:
-    #         for k in ind_keys:
-    #             self.buffers[k][ind_steps] = val[k]
-
-# tmp = Episode({'hi': ((), 'float32'),
-# 'mom': ((3,2),'uint8')})
-# for k in range(10):
-#     tmp.append({'hi': k})
 
 def moving_average(a, n=3) :
     ret = np.cumsum(a, dtype=float)
@@ -290,117 +298,83 @@ class RecurrentReplayMemory:
         equal_weight_episodes=False,
         through_end=True,
         priority_key=None,
+        compute_hidden_hook=None,
     ):
-        # through_end==True <=> we're OK with sampling sequences that end after sequences terminate.
-        subtract_len = 1 if through_end else (1 + seq_len)
+        with torch.no_grad():
+            # through_end==True <=> we're OK with sampling sequences that end after sequences terminate.
+            subtract_len = 1 if through_end else (1 + seq_len)
 
-        if include_current:
-            episodes_to_sample = self.episodes
-            episode_lengths = self.episode_lengths
-        else:
-            episodes_to_sample = self.episodes[:-1]
-            episode_lengths = self.episode_lengths[:-1]
+            if include_current:
+                episodes_to_sample = self.episodes
+                episode_lengths = self.episode_lengths
+            else:
+                episodes_to_sample = self.episodes[:-1]
+                episode_lengths = self.episode_lengths[:-1]
 
-        if equal_weight_episodes:
-            episode_sample_weights = ((episode_lengths - subtract_len)>0).astype(float)
-        elif priority_key is not None:
-            episode_sample_weights = np.array([e[priority_key, :len(e)].sum() for e, l in episodes_to_sample])
-        else:
-            episode_sample_weights = (episode_lengths - subtract_len).clip(0)
-        
-        episode_sample_weights[episode_lengths<=(subtract_len)] = 0
-
-        if episode_sample_weights.sum() == 0:
-            return []
-        
-        to_sample = np.random.choice(
-            len(episodes_to_sample),
-            size=batch_size,
-            replace=True,
-            p=episode_sample_weights/episode_sample_weights.sum(),
-        )
-
-        if priority_key is None:
-            sample_start_ixs = [
-                np.random.choice(episode_lengths[ix] - subtract_len) for ix in to_sample
-            ]
-        else:
-            norm = lambda A: A/A.sum()
-            sample_start_ixs = [
-                np.random.choice(
-                    episode_lengths[ix] - subtract_len, 
-                    p=norm(episodes_to_sample[ix][priority_key, :len(episodes_to_sample[ix])-subtract_len])
-                ) for ix in to_sample
-            ]
-        end_ixs = []
-
-        # res = defaultdict(list)
-        ret, ret_keys = init_array_recursive(self.spaces, (batch_size, seq_len))
-        for ix_in_batch, (ep_ix, start_ix) in enumerate(zip(to_sample, sample_start_ixs)):
-            end_ix = min(start_ix + seq_len, len(episodes_to_sample[ep_ix]))
-            end_ixs.append(end_ix)
-            tmp = episodes_to_sample[ep_ix][start_ix:end_ix]
-            for key_list in ret_keys:
-                src = tmp
-                tgt = ret
-                for k in key_list[:-1]:
-                    src = src[k]
-                    tgt = tgt[k]
-                tgt[key_list[-1]][ix_in_batch, :end_ix-start_ix, ...] = src[key_list[-1]]
+            if equal_weight_episodes:
+                episode_sample_weights = ((episode_lengths - subtract_len)>0).astype(float)
+            elif priority_key is not None:
+                episode_sample_weights = np.array([e[priority_key, :len(e)].sum() for e, l in episodes_to_sample])
+            else:
+                episode_sample_weights = (episode_lengths - subtract_len).clip(0)
             
-        if return_indices:
-            return ret, np.array([to_sample, sample_start_ixs, end_ixs]).T
-        else:
-            return ret
+            episode_sample_weights[episode_lengths<=(subtract_len)] = 0
 
-    # def sample_transitions(
-    #     self, batch_size,
-    # ):
-    #     transitions = self.sample_sequence(batch_size, 2, collate=False)
-    #     return {transitions[0]: 'next_obs':transitions[1].obs}
+            if episode_sample_weights.sum() == 0:
+                return []
+            
+            to_sample = np.random.choice(
+                len(episodes_to_sample),
+                size=batch_size,
+                replace=True,
+                p=episode_sample_weights/episode_sample_weights.sum(),
+            )
 
-    # def update_hidden(self, hidden_hook, seq_len=1000, hidden_ix=4, return_err=False):
-    #     errlist = []
-    #     for episode, ep_len in tqdm.tqdm(
-    #         zip(self.episodes, self.episode_lengths),
-    #         desc=f"Updating hidden states",
-    #         total=len(self.episodes),
-    #     ):
-    #         if ep_len < 2:
-    #             continue
-    #         hx = None
-    #         this_err = 0
-    #         this_norm = 0
-    #         counts = 0
-    #         for start_ix in range(0, ep_len, seq_len):
-    #             if hx is not None and isinstance(hx, tuple):
-    #                 assert 0 == np.max(np.abs(episode[start_ix,-1] - hx[-1]))
-    #             stop_ix = min(start_ix + seq_len, ep_len)
-    #             episode_slice = episode[start_ix:stop_ix]
-    #             hidden_sequence = hidden_hook(self.get_obs(episode_slice), hx)
-    #             if isinstance(hidden_sequence, tuple):
-    #                 hidden_sequence = np.stack(hidden_sequence, axis=1)
-    #             hx = hidden_sequence[-1]
+            if priority_key is None:
+                sample_start_ixs = [
+                    np.random.choice(episode_lengths[ix] - subtract_len) for ix in to_sample
+                ]
+            else:
+                norm = lambda A: A/A.sum()
+                sample_start_ixs = [
+                    np.random.choice(
+                        episode_lengths[ix] - subtract_len, 
+                        p=norm(episodes_to_sample[ix][priority_key, :len(episodes_to_sample[ix])-subtract_len])
+                    ) for ix in to_sample
+                ]
+            end_ixs = []
 
-    #             adj = max(0, (stop_ix+1) - ep_len)
-    #             new_values = hidden_sequence[:len(hidden_sequence)-adj]
+            hiddens = []
 
+            # res = defaultdict(list)
+            if self.episodes[0].tensor_mode:
+                ret, ret_keys = init_array_recursive(
+                    self.spaces, (batch_size, seq_len), 
+                    array_hook=torch.zeros, array_kwargs={'device':self.episodes[0].tensor_device})
+            else:
+                ret, ret_keys = init_array_recursive(
+                    self.spaces, (batch_size, seq_len),
+                )
+            sample_info = []
+            for ix_in_batch, (ep_ix, start_ix) in enumerate(zip(to_sample, sample_start_ixs)):
+                end_ix = min(start_ix + seq_len, len(episodes_to_sample[ep_ix]))
+                end_ixs.append(end_ix)
+                sample_info.append((ix_in_batch, ep_ix, start_ix, end_ix))
+                tmp = episodes_to_sample[ep_ix][start_ix:end_ix]
+                for key_list in ret_keys:
+                    src = tmp
+                    tgt = ret
+                    for k in key_list[:-1]:
+                        src = src[k]
+                        tgt = tgt[k]
+                    tgt[key_list[-1]][ix_in_batch, :end_ix-start_ix, ...] = src[key_list[-1]]
+                if compute_hidden_hook is not None:
+                    hiddens.append(compute_hidden_hook(episodes_to_sample[ep_ix]['obs', :start_ix]))
 
-    #             if return_err:
-    #                 old_values = episode[start_ix+1:min(len(episode),stop_ix+1), hidden_ix]
-    #                 this_err += (old_values*new_values).sum()
-    #                 this_norm += np.array([(new_values**2).sum(), (old_values**2).sum()])
-    #                 counts += np.ones(old_values.shape).sum()
+            if compute_hidden_hook is not None:
+                ret['hx_cx'] = torch.stack(hiddens, -2)
 
-    #             try:
-    #                 episode[start_ix+1:min(len(episode),stop_ix+1), hidden_ix] = new_values
-    #             except:
-    #                 import pdb; pdb.set_trace()
-
-    #         if return_err:
-    #             errlist.append(this_err/(this_norm[0]*this_norm[1]+1.e-5)**0.5)
-    #             if errlist[-1]>(1+1.e-5):
-    #                 import pdb; pdb.set_trace()
-    #     if np.isnan(np.mean(errlist)):
-    #         import pdb; pdb.set_trace()
-    #     return np.array(errlist)
+            if return_indices:
+                return ret, np.array([to_sample, sample_start_ixs, end_ixs]).T
+            else:
+                return ret
