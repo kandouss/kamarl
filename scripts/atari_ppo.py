@@ -14,7 +14,7 @@ import gym
 
 run_time = datetime.datetime.now().strftime("%m_%d_%H:%M:%S")
 
-env = gym.make('Breakout-v0')
+env = gym.make('Breakout-v4')
 save_root = f'/fast/atari_ppo_test/{run_time}'
 
 env = GridRecorder(
@@ -27,11 +27,14 @@ env = GridRecorder(
 agent = PPOAgent(env.observation_space, env.action_space,
     grid_mode=False,
     hyperparams = {
-        'learning_rate': 3.e-4,
-        'num_minibatches': 100,
-        "minibatch_size": 512,
+        'learning_rate': 1.e-4,
+        'num_minibatches': 25,
+        "minibatch_size": 256,
         'minibatch_seq_len': 8,
-        "batch_size": 25,
+        "batch_size": 10,
+        "hidden_update_n_parallel": 2,
+
+        'max_episode_length': 5000,
 
         'entropy_bonus_coef': 0.0,
         
@@ -51,7 +54,7 @@ agent = PPOAgent(env.observation_space, env.action_space,
     }
 )
 
-device = find_cuda_device('1080 Ti')[0]
+device = find_cuda_device('1080 Ti')[1]
 # device = find_cuda_device('1070')
 
 print(count_parameters(agent.ac))

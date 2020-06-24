@@ -2,6 +2,22 @@ import torch
 import numpy as np
 import gym
 import inspect
+import itertools
+import numba
+from baselines.common.vec_env import VecEnv
+
+
+@numba.jit#(numba.float32[:](numba.float32[:], numba.float32))
+def discount_rewards(rewards, gamma):
+    discounted_rewards = 0*rewards
+    c0 = 0.0
+    ix = len(rewards)-1
+    for x in rewards[::-1]:
+        c0 = x + gamma * c0
+        discounted_rewards[ix] = c0
+        ix -= 1
+    return discounted_rewards
+
 
 def count_parameters(mod):
     return np.sum([np.prod(x.shape) for x in mod.parameters()])
@@ -11,6 +27,14 @@ def find_cuda_device(device_name=''):
     matching_cuda_devices = [dev for dev in cuda_devices if (device_name.lower() in torch.cuda.get_device_name(dev).lower())]
     return matching_cuda_devices
     
+
+def chunked_iterable(iterable, size):
+    it = iter(iterable)
+    while True:
+        chunk = tuple(itertools.islice(it, size))
+        if not chunk:
+            break
+        yield chunk
 
 def simplify_box_bounds(value):
     if value is None:
@@ -71,7 +95,47 @@ def get_module_inputs(observation_space):
     return image_shape, n_flat_inputs
 
     
+class DumberVecEnv:
+    def __init__(self, env_fns):
+        self.envs = [fn() for fn in env_fns]
+        env = self.envs[0]
+        VecEnv.__init__(self, len(env_fns), env.observation_space, env.action_space)
+        obs_spaces = self.observation_space.spaces if isinstance(self.observation_space, gym.spaces.Tuple) else (self.observation_space,)
+        self.buf_obs = []
+        self.buf_dones = []
+        self.buf_rews  = []
+        self.buf_infos = []
+        self.actions = []
 
+    def step(self, actions):
+        self.step_async(actions)
+        return self.step_wait()
+
+    def render(self, *args, **kwargs):
+        return [e.render(*args, **kwargs) for e in self.envs]
+
+    def step_async(self, actions):
+        self.actions = actions
+
+    def step_wait(self):
+        return list(zip(*[e.step(a) for e, a in zip(self.envs, self.actions)]))
+        # for i in range(self.num_envs):
+        #     obs, rew, done, info = self.envs[i].step(self.actions[i])
+        # return self.buf_obs, self.buf_rews, self.buf_dones, self.buf_infos
+
+    def reset(self):
+        return [e.reset() for e in self.envs]
+        # for i in range(self.num_envs):
+        #     obs_tuple = self.envs[i].reset()
+        #     if isinstance(obs_tuple, (tuple, list)):
+        #         for t,x in enumerate(obs_tuple):
+        #             self.buf_obs[t][i] = x
+        #     else:
+        #         self.buf_obs[0][i] = obs_tuple
+        # return self.buf_obs
+
+    def close(self):
+        return
 
 def combine_spaces(spaces):
     # if all(isinstance(space, gym.spaces.Discrete) for space in spaces):
@@ -88,6 +152,7 @@ class MultiParallelWrapper(gym.Wrapper):
         super().__init__(env)
         self.n_envs = n_envs
         self.n_agents = n_agents
+        self.num_envs = n_envs
 
     def collate(self, agent_obs):
         assert len(agent_obs) == self.n_envs
@@ -97,13 +162,23 @@ class MultiParallelWrapper(gym.Wrapper):
         
 
     def fix_obs(self, obs):
-        if self.n_agents == obs.shape[1] and self.n_envs == obs.shape[0]:
+        if self.n_agents == len(obs[0]) and self.n_envs == len(obs):
             obs = np.swapaxes(obs, 0, 1)
         return [self.collate(o) for o in obs]
         
         # print("Fixing obs.")
         # import pdb; pdb.set_trace()
         # return obs
+    def render(self, which=0, **kwargs):
+        if hasattr(self.env, 'remotes'): # if env is a subprocvecenv, without importing that class
+            self.env.remotes[which].send(('render', kwargs))
+            return self.env.remotes[which].recv()
+        elif hasattr(self.env, 'envs'):
+            return self.env.envs[which].render(**kwargs)
+        else:
+            return self.env.render(**kwargs)
+
+
 
     def fix_action(self, action):
         # print(f"ACTION SHAPE IS {np.array(action).shape}")
