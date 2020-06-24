@@ -3,115 +3,151 @@ import numpy as np
 import torch.nn as nn
 
 import datetime, time
-import types
+import os
 
-from kamarl.ppo2 import PPOAgent
+from kamarl.ppo import PPOAgent
 from kamarl.utils import find_cuda_device, count_parameters
 from kamarl.agents import IndependentAgents
 from kamarl.logging import WandbLogger
 
-from marlgrid import envs as marl_envs
+from marlgrid.envs import env_from_config
+# from marlgrid import envs as marl_envs
+from marlgrid.agents import GridAgentInterface
 from marlgrid.utils.video import GridRecorder
 
 
 run_time = datetime.datetime.now().strftime("%m_%d_%H:%M:%S")
 device = find_cuda_device('1080 Ti')[1]
+# device = torch.device('cpu')
 
-agent_config = {
-    'view_tile_size': 3,
-    'view_size': 7,
-    'observation_style': 'rich',
-    'prestige_beta': 3.0, # determines the number of rewards to go from red to blue.
-    'hyperparams': {
+save_root = os.path.abspath(os.path.expanduser(f'/tmp/marlgrid_ppo_refactor/{run_time}'))
 
-        "batch_size": 16,
-        'num_minibatches': 100,
-        "minibatch_size": 256,
-        "minibatch_seq_len": 8,
-        "hidden_update_interval": 5,
+num_episodes = int(1e6)
 
-        'learning_rate': 1.e-4, # 1.e-3, #
-        "kl_target":  0.01,
-        "clamp_ratio": 0.2,
-        "lambda":0.97,
-        "gamma": 0.99,
-        'entropy_bonus_coef': 0.0,#0001,
-        'value_loss_coef': 1.0,
-
-        "module_hyperparams": {
-            "conv_layers" : [
-                {'out_channels': 16, 'kernel_size': 3, 'stride': 3, 'padding': 0},
-                {'out_channels': 32, 'kernel_size': 3, 'stride': 1, 'padding': 1},
-                {'out_channels': 64, 'kernel_size': 3, 'stride': 1, 'padding': 1}
-            ],
-            'input_trunk_layers': [128],
-            'lstm_hidden_size': 128,
-            'val_mlp_layers': [64],
-            'pi_mlp_layers': [64]
-        }
-    }
-}
-
-save_root = f'/fast/marlgrid_ppo/{run_time}'
-
-agents = IndependentAgents(
-    PPOAgent(**agent_config, color='prestige'),
-    # PPOAgent(**agent_config, color='prestige'),
-    # PPOAgent(**agent_config, color='prestige'),
-)
-agents.set_device(device)
-print(f"Agents have {count_parameters(agents.agents[0].ac)} parameters.")
-
-# # Params for cluttered multigrid
-# env_config = {
-#     'grid_size': 9,
-#     'max_steps': 100,
-#     'seed': 1,
-#     'randomize_goal': True,
-#     'clutter_density': 0.25,
-#     'respawn': True,
-#     'ghost_mode': True,
-#     'reward_decay': False,
-# }
-# env = marl_envs.ClutteredMultiGrid([agent.obj for agent in agents], **env_config)
-
-# # Params for goal cycle gridworld
+# Config for a cluttered multigrid
 env_config = {
+    'env_class': 'ClutteredMultiGrid',
+
     'grid_size': 9,
     'max_steps': 150,
     'clutter_density': 0.2,
-    'seed': np.random.randint(1337*1337),
-    'n_bonus_tiles': 3,
-    'initial_reward': True,
-    'penalty': -0.5,
     'respawn': True,
     'done_condition': 'all',
     'ghost_mode': True,
     'reward_decay': False, # default true.
 }
-env = marl_envs.ClutteredGoalCycleEnv([agent.obj for agent in agents], **env_config)
+
+# Config for a cluttered goal cycle environment
+env_config = {
+    'env_class': 'ClutteredGoalCycleEnv',
+    'grid_size': 20,
+    'max_steps': 300,
+    'clutter_density': 0.2,
+    'respawn': True,
+    'done_condition': 'all',
+    'ghost_mode': True,
+    'reward_decay': False, # default true.
+    'n_bonus_tiles': 3,
+    'initial_reward': True,
+    'penalty': -0.5,
+}
+
+agent_interface_config = {
+    'view_tile_size': 3,
+    'view_size': 9,
+    'view_offset': 3,
+    'observation_style': 'rich',
+    'prestige_beta': 0.95, # determines the rate at which prestige decays
+    'color': 'prestige',
+}
+
+ppo_learning_config = {
+    "batch_size": 8,
+    'num_minibatches': 30,
+    "minibatch_size": 256,
+    "minibatch_seq_len": 8,
+    "hidden_update_interval": 2,
+
+    'learning_rate': 1.e-4, # 1.e-3, #
+    "kl_target":  0.01,
+    "clamp_ratio": 0.2,
+    "lambda":0.97,
+    "gamma": 0.99,
+    'entropy_bonus_coef': 0.0,#0001,
+    'value_loss_coef': 1.0,
+}
+
+ppo_model_config = {
+    "conv_layers" : [
+        {'out_channels': 8, 'kernel_size': 3, 'stride': 3, 'padding': 0},
+        {'out_channels': 16, 'kernel_size': 3, 'stride': 1, 'padding': 0},
+        {'out_channels': 16, 'kernel_size': 3, 'stride': 1, 'padding': 0},
+    ],
+    'input_trunk_layers': [192],
+    'lstm_hidden_size': 192,
+    'val_mlp_layers': [64,64],
+    'pi_mlp_layers': [64,64],
+}
+
+load_agents = [] # List of save paths of already-made agents to load into the env
+n_new_agents = 1 # Number of new agents to be created with the above config/hyperparameters.
 
 
-wbl = WandbLogger(name='ppo', project='marlgrid_stale_refreshing_test')
-agents.set_logger(wbl)
-wbl.log_hyperparams({
-    'env_name': env.__class__.__name__,
-    'env_params': env_config,
-    'hparams': agents[0].hyperparams})
+grid_agents = []
+new_agents_info = [
+    {'interface_config': agent_interface_config, 'learning_config': ppo_learning_config, 'model_config': ppo_model_config}
+    for _ in range(n_new_agents)
+]
+
+grid_agents = []
+
+for agent_load_path in load_agents:
+    grid_agents.append(PPOAgent.load(agent_load_path))
 
 
-# env = GridRecorder(
-#     env,
-#     max_steps=env_config['max_steps']+1,
-#     save_root=save_root,
-#     auto_save_interval=100
-# )
+for agent_info in new_agents_info:
+    iface = GridAgentInterface(**agent_info['interface_config'])
+    new_fella = PPOAgent(
+        observation_space=iface.observation_space,
+        action_space=iface.action_space, 
+        learning_config=agent_info['learning_config'],
+        model_config=agent_info['model_config'],
+    )
+    new_fella.metadata['marlgrid_interface'] = agent_interface_config
+    grid_agents.append(new_fella)
+
+
+agents = IndependentAgents(*grid_agents)
+
+agents.set_device(device)
+print(f"Agents have {count_parameters(agents.agents[0].ac)} parameters.")
+
+
+env = env_from_config(env_config)
+for agent in agents:
+    env.add_agent(GridAgentInterface(**agent.metadata['marlgrid_interface']))
+# env = marl_envs.ClutteredGoalCycleEnv([agent_interface.clone() for agent in agents], **env_config)
+
+
+wbl = None
+# wbl = WandbLogger(name='ppo', project='marlgrid_stale_refreshing_test')
+# agents.set_logger(wbl)
+# wbl.log_hyperparams({
+#     'env_name': env.__class__.__name__,
+#     'env_params': env_config,
+#     'hparams': agents[0].hyperparams})
+
+env = GridRecorder(
+    env,
+    max_steps=env_config['max_steps']+1,
+    save_root=save_root,
+    auto_save_interval=100,
+)
 
 
 
 total_reward = 0
 total_steps = 0
-num_episodes = int(1e6)
 for ep_num in range(num_episodes):
     # Initialize the environment and state
     obs_array = env.reset()
@@ -142,13 +178,15 @@ for ep_num in range(num_episodes):
 
                 ep_steps += 1
                 total_steps += 1
+                
+                # time.sleep(0.1)
                 # env.render(show_agent_views=True)
                 # input()
 
 
             ep_time = time.time() - ep_start_time
             if ep_num % 500 == 0:
-                agents[0].save(f"/fast/multigrid3/run_{run_time}/episode_{ep_num}/")
+                agents[0].save(os.path.join(save_root, f"episode_{ep_num}/"))
 
             print(
                 f"Episode {ep_num: >5d}: len={ep_steps: <4d} | cum rew={total_reward: <4.1f} ({ep_reward: >+3.1f}) | fps={ep_steps/ep_time: >5.2f}"

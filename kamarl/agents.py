@@ -6,14 +6,12 @@ import types
 import gym
 from abc import ABC, abstractmethod, abstractproperty
 from kamarl.utils import space_to_dict, dict_to_space, combine_spaces
-from marlgrid.agents import InteractiveGridAgent
+from marlgrid.agents import GridAgentInterface
 from contextlib import contextmanager
+import warnings
 
 
 class RLAgentBase(ABC):
-    @abstractproperty
-    def active(self):
-        pass
 
     @abstractmethod
     def action_step(self, obs):
@@ -37,31 +35,38 @@ class RLAgentBase(ABC):
         yield self
         self.end_episode()
 
-class Agent(RLAgentBase):#(InteractiveGridAgent):
+class Agent(RLAgentBase):
     save_modules = []
-    def __init__(self, observation_space=None, action_space=None, grid_mode=True, logger=None, train_history=[], **kwargs):
-        self.grid_agent_kwargs = {k:v for k,v in kwargs.items() if k not in ['class']}
-        if grid_mode:
-            self.obj = InteractiveGridAgent(**self.grid_agent_kwargs)
-            self.observation_space = self.obj.observation_space
-            self.action_space = self.obj.action_space
-            self.metadata = {**self.obj.metadata}
+    def __init__(self, observation_space, action_space, metadata={}, train_history=[], logger=None):
 
         self.logger = logger
+        self.observation_space = self.ensure_space(observation_space)
+        self.action_space = self.ensure_space(action_space)
+        self.learning_config = {}
+        self.model_config = {}
+        self.metadata = metadata
+        self.train_history = train_history
+        self.updates_since_history_update = 0
 
-        if observation_space is not None:
-            self.observation_space = self.ensure_space(observation_space)
-        if action_space is not None:
-            self.action_space = self.ensure_space(action_space)
-
-        self.metadata = {
-            **getattr(self, 'metadata', {}),
+    @property
+    def _save_state(self):
+        return {
             'class': self.__class__.__name__,
-            'grid_mode': grid_mode,
             'observation_space': space_to_dict(self.observation_space),
             'action_space': space_to_dict(self.action_space),
-            'train_history': train_history
+            'learning_config': self.learning_config,
+            'model_config': self.model_config,
+            'metadata': self.metadata,
+            'train_history': self.updated_train_history,
         }
+
+    @property
+    def updated_train_history(self):
+        return [*self.train_history, 
+        {
+            'metadata': self.metadata,
+            'learning_config': self.learning_config,
+        }]
 
     def track_gradients(self, module, log_frequency=10):
         # Weights and biases v. 0.8.32? was crashing when Kamal tried to log gradients using
@@ -107,13 +112,6 @@ class Agent(RLAgentBase):#(InteractiveGridAgent):
         else:
             return dict_or_space
 
-    @property
-    def active(self):
-        if bool(self.metadata['grid_mode']):
-            return self.obj.active
-        else:
-            return True
-
     @abstractmethod
     def set_device(self, dev):
         pass
@@ -140,11 +138,11 @@ class Agent(RLAgentBase):#(InteractiveGridAgent):
         yield self
         self.end_episode()
 
+
     def save(self, save_dir, force=False):
         save_dir = os.path.abspath(os.path.expanduser(save_dir))
         model_path = os.path.join(save_dir, 'model.tar')
         metadata_path = os.path.join(save_dir, 'metadata.json')
-
 
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
@@ -162,7 +160,8 @@ class Agent(RLAgentBase):#(InteractiveGridAgent):
                     }, model_path)
 
         # Update the training history before saving metadata.
-        json.dump(self.metadata, open(metadata_path, "w"))
+
+        json.dump(self._save_state, open(metadata_path, "w"))
 
     @classmethod
     def load(cls, save_dir):
@@ -172,7 +171,10 @@ class Agent(RLAgentBase):#(InteractiveGridAgent):
         metadata_path = os.path.join(save_dir, 'metadata.json')
 
         metadata = json.load(open(metadata_path,'r'))
-        ret = cls(**metadata)
+
+        if metadata['class'] != cls.__name__:
+            warnings.warn(f"Attempting to load a {cls.__name__} from a {metadata['class']} checkpoint.")
+        ret = cls(**{k:v for k,v in metadata.items() if k != 'class'})
 
         modules_dict = torch.load(model_path)
         
@@ -207,10 +209,7 @@ class IndependentAgents(RLAgentBase):
                 agent.set_logger(logger.sub_logger(f'agent_{k}'))
 
     def action_step(self, obs_array):
-        return [
-            agent.action_step(obs) if agent.active else agent.action_space.sample()
-            for agent, obs in zip(self.agents, obs_array)
-        ]
+        return [agent.action_step(obs) for agent, obs in zip(self.agents, obs_array)]
 
     def set_device(self, dev):
         for agent in self.agents:
@@ -236,9 +235,9 @@ class IndependentAgents(RLAgentBase):
         for agent in self.agents:
             agent.end_episode(*args, **kwargs)
 
-    @property
-    def active(self):
-        return np.array([agent.active for agent in self.agents], dtype=np.bool)
+    # @property
+    # def active(self):
+    #     return np.array([agent.active for agent in self.agents], dtype=np.bool)
 
     def __len__(self):
         return len(self.agents)

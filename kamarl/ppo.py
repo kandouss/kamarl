@@ -18,47 +18,46 @@ from kamarl.utils import space_to_dict, dict_to_space, get_module_inputs, chunke
 
 import copy
 
-def check_hyperparams(class_name, specified, actual):
-    bad_hyperparams = []
-    for k, v in specified.items():
-        if k not in actual:
-            bad_hyperparams.append(k)
-    if len(bad_hyperparams) > 0:
-        warning_message = f"Creating {class_name} with {len(bad_hyperparams)} unused hyperparameter(s): {bad_hyperparams}"
-        warnings.warn(warning_message)
+
+def update_config_dict(base_config, new_config):
+    novel_keys = []
+    updated_config = copy.deepcopy(base_config)
+    for k,v in new_config.items():
+        if k not in base_config:
+            novel_keys.append(k)
+        updated_config[k] = v
+    return updated_config, novel_keys
+        
+
 
 class PPOLSTM(nn.Module):
-    default_hyperparams = dict(
-        conv_layers = [
+    default_config = {
+        "conv_layers" : [
             {'out_channels': 8, 'kernel_size': 3, 'stride': 3, 'padding': 0},
-            {'out_channels': 16, 'kernel_size': 3, 'stride': 1, 'padding': 1},
-            {'out_channels': 32, 'kernel_size': 3, 'stride': 1, 'padding': 1}
+            {'out_channels': 16, 'kernel_size': 3, 'stride': 1, 'padding': 0},
+            {'out_channels': 16, 'kernel_size': 3, 'stride': 1, 'padding': 0},
         ],
-        input_trunk_layers = [128],
-        lstm_hidden_size = 128,
-        val_mlp_layers = [128,128],
-        pi_mlp_layers = [128]
-    )
+        'input_trunk_layers': [192],
+        'lstm_hidden_size': 192,
+        'val_mlp_layers': [64,64],
+        'pi_mlp_layers': [64,64],
+    }
+    
 
     def __init__(
             self,
             observation_space,
             action_space,
-            hyperparams = {}
+            config = {}
         ):
         if not isinstance(action_space, gym.spaces.Discrete):
             raise ValueError(
-                f"{self.__class__.__name__} only supports discrete actions"
+                f"{self.__class__.__name__} only supports discrete action spaces"
             )
 
-        check_hyperparams(self.__class__.__name__, hyperparams, self.default_hyperparams)
-
-        self.hyperparams = {
-            **self.default_hyperparams,
-            **hyperparams,
-            'action_space': space_to_dict(action_space),
-            'observation_space': space_to_dict(observation_space)
-        }
+        self.config, novel_keys = update_config_dict(self.default_config, config)
+        if len(novel_keys) > 0:
+            warnings.warn(f"Specified unknown keys in {self.__class__.__name__} model config: ", novel_keys)
 
         super().__init__()
 
@@ -75,10 +74,10 @@ class PPOLSTM(nn.Module):
 
         in_channels = 3 # todo: infer number of image channels from observation space shape.
         conv_layers = []
-        for k,c in enumerate(self.hyperparams['conv_layers']):
+        for k,c in enumerate(self.config['conv_layers']):
             conv_layers.append(nn.Conv2d(in_channels, **c))
             in_channels = c['out_channels']
-            if k < len(self.hyperparams['conv_layers']) - 1:
+            if k < len(self.config['conv_layers']) - 1:
                 conv_layers.append(nn.ReLU(inplace=True))
 
         self.conv_layers = ConvNet(
@@ -88,7 +87,7 @@ class PPOLSTM(nn.Module):
         )
 
         self.combined_input_layers = make_mlp(
-            [self.conv_layers.n + n_flat_inputs, *self.hyperparams['input_trunk_layers']],
+            [self.conv_layers.n + n_flat_inputs, *self.config['input_trunk_layers']],
             nonlinearity=nn.Tanh,
             output_nonlinearity=nn.Tanh)
         
@@ -98,26 +97,26 @@ class PPOLSTM(nn.Module):
         else:
             feature_count = tmp[-1]
 
-        self.lstm = SeqLSTM(feature_count, self.hyperparams['lstm_hidden_size'])
+        self.lstm = SeqLSTM(feature_count, self.config['lstm_hidden_size'])
         
         self.mlp_val = make_mlp(
-            layer_sizes=[self.lstm.hidden_size, *self.hyperparams['val_mlp_layers'], 1],
+            layer_sizes=[self.lstm.hidden_size, *self.config['val_mlp_layers'], 1],
             nonlinearity=nn.Tanh,
             output_nonlinearity=None
         )
 
         self.mlp_pi = make_mlp(
-            layer_sizes=[self.lstm.hidden_size, *self.hyperparams['pi_mlp_layers'], action_space.n],
+            layer_sizes=[self.lstm.hidden_size, *self.config['pi_mlp_layers'], action_space.n],
             nonlinearity=nn.Tanh,
             output_nonlinearity=None
         )
 
     def empty_hidden(self, numpy=False):
         if numpy:
-            return np.zeros((2, self.hyperparams['lstm_hidden_size']), dtype=np.float32)
+            return np.zeros((2, self.config['lstm_hidden_size']), dtype=np.float32)
         else:
             return torch.zeros(
-                (2, self.hyperparams['lstm_hidden_size']),
+                (2, self.config['lstm_hidden_size']),
                 dtype=torch.float32,
                 device=device_of(self))
 
@@ -191,49 +190,48 @@ def parallel_repeat(value, n_parallel=None):
         return np.repeat(np.array(value)[None,...], n_parallel, axis=0)
 
 class PPOAgent(Agent):
-    default_hyperparams = {
-        'num_minibatches': 10,
-        'min_num_minibatches': 1,
-        "max_episode_length": 1000,
-        "batch_size": 25, # episodes
-        "hidden_update_interval": 10, # minibatches!
-        "hidden_update_n_parallel": 32,
-        "minibatch_size": 256,
-        "minibatch_seq_len": 10,
-        
-        'learning_rate': 3.e-4,
-        "kl_target": 0.01,
-        "kl_hard_limit": 0.03,
-        "clamp_ratio": 0.2,
-        "lambda":0.97,
-        "gamma": 0.99,
-        'entropy_bonus_coef': 0.001,
-        'value_loss_coef': 0.5,
-
-        "module_hyperparams": {}
+    default_learning_config = {
+            'num_minibatches': 10,
+            'min_num_minibatches': 1,
+            "max_episode_length": 1000,
+            "batch_size": 25, # episodes
+            "hidden_update_interval": 5, # minibatches!
+            "hidden_update_n_parallel": 32,
+            "minibatch_size": 256,
+            "minibatch_seq_len": 10,
+            'learning_rate': 3.e-4,
+            "kl_target": 0.01,
+            "kl_hard_limit": 0.03,
+            "clamp_ratio": 0.2,
+            "lambda":0.97,
+            'entropy_bonus_coef': 0.001,
+            'value_loss_coef': 0.5,
+            "gamma": 0.99,
+    }
+    default_model_config = {
+        # The default values for the model configuration are set 
+        #  in the PPOLSTM class. Values set here would overwrite
+        #  those defaults.
     }
     save_modules = ['ac', 'optimizer']
-    def __init__(self, *args, hyperparams={}, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, observation_space, action_space, learning_config={}, model_config={}, metadata={}, train_history=[]):
+        super().__init__(
+            observation_space=observation_space,
+            action_space=action_space,
+            metadata=metadata,
+            train_history=train_history)
 
-        check_hyperparams(self.__class__.__name__, hyperparams, self.default_hyperparams)
-
-        self.hyperparams = {**self.default_hyperparams, **hyperparams}
-
-        self.ac = PPOLSTM(self.observation_space, self.action_space, hyperparams=self.hyperparams['module_hyperparams'])
+        self.learning_config, novel_keys = update_config_dict(self.default_learning_config, learning_config)
+        if len(novel_keys) > 0:
+            warnings.warn(f"Specified unknown keys in {self.__class__.__name__} learning config: ", novel_keys)
+        
+        self.ac = PPOLSTM(self.observation_space, self.action_space, config=model_config)
         self.ac_backup = copy.deepcopy(self.ac)
-
-        self.hyperparams['module_hyperparams'] = self.ac.hyperparams
-
+        
         # self.track_gradients(self.ac)
         self.training = True
 
-        self.metadata = {
-            **self.metadata,
-            'hyperparams': self.hyperparams
-        }
-
-        self.replay_spaces = {
+        self.replay_memory_array_specs = {
                 'obs': self.observation_space,
                 'act': self.action_space,
                 'rew': ((), "float32"),
@@ -246,9 +244,9 @@ class PPOAgent(Agent):
             }
 
         self.replay_memory = RecurrentReplayMemory(
-            self.replay_spaces,
-            max_episode_length=self.hyperparams["max_episode_length"]+1,
-            max_num_steps=(self.hyperparams["max_episode_length"]+1) * (self.hyperparams['batch_size']+1)
+            self.replay_memory_array_specs,
+            max_episode_length=self.learning_config["max_episode_length"]+1,
+            max_num_steps=(self.learning_config["max_episode_length"]+1) * (self.learning_config['batch_size']+1)
         )
         self.device = torch.device('cpu')
 
@@ -259,6 +257,23 @@ class PPOAgent(Agent):
         self.reset_state()
         self.reset_info()
         self.counts = defaultdict(int)
+    @property
+    def updated_train_history(self):
+        return [*self.train_history, 
+        {
+            'metadata': self.metadata,
+            'learning_config': self.learning_config,
+            'n_updates': self.counts['updates'],
+            'n_episodes': self.counts['episodes']
+        }]
+    @property
+    def config(self):
+        return {
+            'observation_space': space_to_dict(self.observation_space),
+            'action_space': space_to_dict(self.action_space),
+            'learning_config': self.learning_config,
+            'model_config': self.ac.config,
+        }
 
     def reset_info(self):
         self.logged_lengths = []
@@ -274,6 +289,7 @@ class PPOAgent(Agent):
             'ret': 0,
             'logp': 0
         }
+        self.active = np.zeros(self.n_parallel, dtype=np.bool)
         self.state = {
             k:parallel_repeat(v, self.n_parallel)
             for k, v in self.state.items()
@@ -305,7 +321,7 @@ class PPOAgent(Agent):
     def reset_optimizer(self):
         self.optimizer = torch.optim.Adam(
             self.ac.parameters(),
-            lr = self.hyperparams['learning_rate'])
+            lr = self.learning_config['learning_rate'])
 
     def action_step(self, X):
         self.ac.eval()
@@ -378,7 +394,7 @@ class PPOAgent(Agent):
             update_value_count = 0
             for episodes in chunked_iterable(sorted(episodes, key=lambda e: len(e)), size=parallel):
                 max_len = max(len(e) for e in episodes)
-                data, keys = init_array_recursive(self.replay_spaces['obs'], (len(episodes), max_len),
+                data, keys = init_array_recursive(self.replay_memory_array_specs['obs'], (len(episodes), max_len),
                                     array_hook=torch.zeros,  array_kwargs = {'device':self.device})
                 
                 for i,ep in enumerate(episodes):
@@ -421,7 +437,7 @@ class PPOAgent(Agent):
 
     def calculate_advantages(self, episode, last_val=0):
         ''' Populate advantages and returns in an episode. '''
-        hp = self.hyperparams
+        hp = self.learning_config
         rew = np.append(episode.rew, last_val)
         vals = np.append(episode.val, last_val)
 
@@ -440,7 +456,7 @@ class PPOAgent(Agent):
     def compute_loss(self, data):
         mask = data['done'].cumsum(1).cumsum(1)<=1
         N = mask.sum()
-        clamp_ratio = self.hyperparams['clamp_ratio']
+        clamp_ratio = self.learning_config['clamp_ratio']
 
         # policy loss
         pi, v_theta = self.ac.pi_v(data['obs'], data['hx_cx'])
@@ -474,7 +490,7 @@ class PPOAgent(Agent):
         with torch.no_grad():
             mask = data['done'].cumsum(1).cumsum(1)<=1
             N = mask.sum()
-            clamp_ratio = self.hyperparams['clamp_ratio']
+            clamp_ratio = self.learning_config['clamp_ratio']
 
             # policy loss
             pi, v_theta = self.ac.pi_v(data['obs'], data['hx_cx'])
@@ -515,7 +531,7 @@ class PPOAgent(Agent):
         self.reset_info()
 
         if bool(self.training):
-            hp = self.hyperparams
+            hp = self.learning_config
             device = self.device
 
             pi_infos = []
@@ -567,8 +583,8 @@ class PPOAgent(Agent):
                         break
 
                     ( policy_loss +
-                      critic_loss * self.hyperparams['value_loss_coef'] + 
-                      entropy_loss * self.hyperparams['entropy_bonus_coef']
+                      critic_loss * self.learning_config['value_loss_coef'] + 
+                      entropy_loss * self.learning_config['entropy_bonus_coef']
                     ).backward()
 
                     self.optimizer.step()
@@ -698,9 +714,7 @@ class PPOAgent(Agent):
         self.counts['episodes'] += len(self.active_episodes)
         self.counts['episode_step'] = 0
 
-        # if self.counts['episodes']>0 and ((self.counts['episodes'] % self.hyperparams['batch_size'])==0):
-            # if self.counts['episodes'] - getattr(self, 'last_update_episode', 0) >= self.hyperparams['batch_size']:
-        if len(self.replay_memory.episodes) >= self.hyperparams['batch_size']:
+        if len(self.replay_memory.episodes) >= self.learning_config['batch_size']:
             self.optimize()
             self.last_update_episode = self.counts['episodes']
 
