@@ -227,6 +227,8 @@ class PPOAgent(Agent):
         
         self.ac = PPOLSTM(self.observation_space, self.action_space, config=model_config)
         self.ac_backup = copy.deepcopy(self.ac)
+
+        self.model_config = self.ac.config
         
         # self.track_gradients(self.ac)
         self.training = True
@@ -257,6 +259,7 @@ class PPOAgent(Agent):
         self.reset_state()
         self.reset_info()
         self.counts = defaultdict(int)
+
     @property
     def updated_train_history(self):
         return [*self.train_history, 

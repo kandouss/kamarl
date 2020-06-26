@@ -164,7 +164,7 @@ class Agent(RLAgentBase):
         json.dump(self._save_state, open(metadata_path, "w"))
 
     @classmethod
-    def load(cls, save_dir):
+    def load(cls, save_dir, device=None):
         print(f"Loading", cls.__name__)
         save_dir = os.path.abspath(os.path.expanduser(save_dir))
         model_path = os.path.join(save_dir, 'model.tar')
@@ -176,7 +176,9 @@ class Agent(RLAgentBase):
             warnings.warn(f"Attempting to load a {cls.__name__} from a {metadata['class']} checkpoint.")
         ret = cls(**{k:v for k,v in metadata.items() if k != 'class'})
 
-        modules_dict = torch.load(model_path)
+        if device is None:
+            device = getattr(ret, 'device', None)
+        modules_dict = torch.load(model_path, map_location=device)
         
         for k,v in modules_dict.items():
             try:
