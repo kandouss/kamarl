@@ -52,7 +52,7 @@ def init_array_recursive(spec, length, key_list = [], array_hook=np.zeros, array
         out = {}
         leaf_keys = []
         for k,v in spec.items():
-            out[k], tmp = init_array_recursive(v, length, [*key_list, k], array_hook=array_hook)
+            out[k], tmp = init_array_recursive(v, length, [*key_list, k], array_hook=array_hook, array_kwargs=array_kwargs)
             leaf_keys.extend(tuple(tmp))
         return out, leaf_keys
 

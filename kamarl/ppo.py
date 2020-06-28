@@ -11,7 +11,7 @@ from collections import defaultdict
 
 import gym
 
-from kamarl.modules import ConvNet, SeqLSTM, make_mlp, device_of
+from kamarl.modules import ConvNet, SeqLSTM, make_mlp, device_of, PixelDropout
 from kamarl.buffers import RecurrentReplayMemory, init_array_recursive
 from kamarl.agents import Agent
 from kamarl.utils import space_to_dict, dict_to_space, get_module_inputs, chunked_iterable, discount_rewards, discount_rewards_tensor
@@ -73,16 +73,20 @@ class PPOLSTM(nn.Module):
         trunk = []
 
         in_channels = 3 # todo: infer number of image channels from observation space shape.
-        conv_layers = []
+        conv_layers = [
+            # PixelDropout(0.1)
+        ]
         for k,c in enumerate(self.config['conv_layers']):
             conv_layers.append(nn.Conv2d(in_channels, **c))
+            # if k == 0:
+            #     conv_layers.append(PixelDropout(0.1))
             in_channels = c['out_channels']
             if k < len(self.config['conv_layers']) - 1:
                 conv_layers.append(nn.ReLU(inplace=True))
 
         self.conv_layers = ConvNet(
             *conv_layers,
-            image_size=input_image_shape,
+            input_shape=input_image_shape,
             output_nonlinearity=nn.Tanh,
         )
 
@@ -327,6 +331,7 @@ class PPOAgent(Agent):
             lr = self.learning_config['learning_rate'])
 
     def action_step(self, X):
+        was_training = self.ac.training
         self.ac.eval()
         last_hx_cx = self.hx_cx.detach().cpu().numpy()
         if self.n_parallel is not None:
@@ -349,6 +354,8 @@ class PPOAgent(Agent):
         self.counts['steps'] += 1
         self.counts['episode_steps'] += 1
 
+        if was_training:
+            self.ac.train()
         return a
 
     def save_step(self, obs, act, rew, done, ignore_step=False):
@@ -383,7 +390,10 @@ class PPOAgent(Agent):
                     else:
                         ep.append({k: decollate(v,i) for k,v in save_dict.items()})
 
-    def refresh_stale(self, episodes, parallel=32, refresh_hidden=True, refresh_adv=True, return_mse=False, torch_mode=False):
+    def refresh_stale(self, episodes, parallel=32, refresh_hidden=True, refresh_adv=True, return_mse=False):
+        torch_mode = episodes[0].tensor_mode
+        was_eval = not self.ac.training
+        self.ac.train()
         with torch.no_grad():
             update_sum_err = 0
             update_value_count = 0
@@ -411,6 +421,7 @@ class PPOAgent(Agent):
                             else:
                                 tgt[i,:len(src),...] = src
 
+
                 # Transpose below changes from (hx/cx, ep/batch, seq, hid)
                 # to (ep/batch, seq, hx/cx, hid)
                 _, new_values, new_hiddens = self.ac.pi_v(data, hx=None, return_hidden=True)
@@ -432,10 +443,14 @@ class PPOAgent(Agent):
                     if refresh_adv:
                         ep['val'][:] = new_values[i, :len(ep), 0]
                         self.calculate_advantages(ep)
-        if refresh_adv:
-            self.normalize_advantages()
-        if return_mse:
-            return update_sum_err/update_value_count
+            if refresh_adv:
+                self.normalize_advantages()
+
+            if was_eval:
+                self.ac.eval()
+
+            if return_mse:
+                return update_sum_err/update_value_count
 
     def calculate_advantages(self, episode, last_val=0):
         ''' Populate advantages and returns in an episode. '''
@@ -446,6 +461,7 @@ class PPOAgent(Agent):
             vals = torch.cat((episode.val, episode.val.new_tensor([last_val])))
             deltas = rew[:-1] + hp['gamma'] * (vals[1:] - vals[:-1])
             episode['adv',:] = discount_rewards_tensor(deltas, deltas.new_tensor(hp['gamma']*hp['lambda']))
+
             episode['ret',:] = discount_rewards_tensor(rew, rew.new_tensor(hp['gamma']))[:-1]
         else:
             rew = np.append(episode.rew, np.array(last_val, dtype=episode.rew.dtype))
@@ -519,6 +535,8 @@ class PPOAgent(Agent):
 
     def sample_replay_buffer(self, batch_size, seq_len):
         data = self.replay_memory.sample_sequence(batch_size=batch_size, seq_len=seq_len)
+        # print(f"DATA DEVICE IS {dat")
+        # import pdb; pdb.set_trace()
         if self.replay_memory.episodes[0].tensor_mode:
             data['hx_cx'] = data['hx_cx'][:,0,...].transpose(-2,0)
             return data
@@ -568,12 +586,11 @@ class PPOAgent(Agent):
             self.normalize_advantages()
             self.ac.train()
 
-            for episode in self.replay_memory.episodes:
-                episode.to_tensor(device=device)
+            # for episode in self.replay_memory.episodes:
+            #     episode.to_tensor(device=device)
 
             n_minibatches = 0
             for i in range(hp['num_minibatches']):
-
                 # If it's time, recompute the advantages and hidden states in the replay buffer to make sure
                 # they don't get too stale.
                 hid_up_in = hp["hidden_update_interval"]
@@ -581,7 +598,6 @@ class PPOAgent(Agent):
                     n_hidden_updates += 1
                     self.refresh_stale(self.replay_memory.episodes, parallel=hp['hidden_update_n_parallel'])
                     self.normalize_advantages()
-
                 
                 # Back up the network parameters and the optimizer state after the minimum number of minibatches.
                 # If the policy later drifts too far, this backup will be used to undo the subsequent gradient 
@@ -629,7 +645,7 @@ class PPOAgent(Agent):
             # If it has, then reset the actor, critic, and optimizer parameters to the backup values saved above.
             used_backup = False
             if hp['kl_hard_limit'] is not None:
-                self.refresh_stale(self.replay_memory.episodes)
+                self.refresh_stale(self.replay_memory.episodes, parallel=hp['hidden_update_n_parallel'])
                 kl_after = self.check_kl(self.ac, self.sample_replay_buffer(batch_size=512, seq_len=8))
 
                 if kl_after > hp['kl_hard_limit']:
@@ -646,17 +662,19 @@ class PPOAgent(Agent):
             entropy_losses = entropy_losses[:n_minibatches]
             pi_infos = pi_infos[:n_minibatches]
 
+            mean = lambda vals: np.nan if len(vals) == 0 else np.nanmean(vals) if not isinstance(vals[0], torch.Tensor) else torch.tensor(vals).mean().cpu().item()
+
             steps = np.array([len(e) for e in self.replay_memory.episodes])
-            mean_val = np.array([e.val.mean() for e in self.replay_memory.episodes]).mean()
-            mean_clip_frac = np.nanmean(np.array([pd['cf'] for pd in pi_infos]))
+            mean_val = mean([e.val.mean() for e in self.replay_memory.episodes])
+            mean_clip_frac = mean([pd['cf'] for pd in pi_infos])
 
             log_data = {
                 **log_data,
                 'n_minibatch_steps': n_minibatches,
-                'mean_buffer_logp': np.mean([x.logp.mean() for x in self.replay_memory.episodes]),
-                'mean_critic_loss': np.mean(critic_losses),
-                'mean_policy_loss': np.mean(policy_losses),
-                'mean_entropy_loss': np.mean(entropy_losses),
+                'mean_buffer_logp': mean([x.logp.mean() for x in self.replay_memory.episodes]),
+                'mean_critic_loss': mean(critic_losses),
+                'mean_policy_loss': mean(policy_losses),
+                'mean_entropy_loss': mean(entropy_losses),
                 'mean_val': mean_val,
                 'mean_pi_clip_frac': mean_clip_frac,
                 'n_hidden_updates': n_hidden_updates,
@@ -669,9 +687,9 @@ class PPOAgent(Agent):
             print(f"Update {1+self.counts['updates']}: {n_minibatches} iters, {n_hidden_updates} hidden updates.")
             print(f" > {len(self.replay_memory.episodes)} episodes since last update.")
             print(f" > Total steps: {steps.sum()} - avg {steps.mean():.2f} for {len(steps)} eps.")
-            print(f" > Mean reward: {np.array([x.rew.sum() for x in self.replay_memory.episodes]).mean():.2f}")
-            print(f" > Mean logp: {np.mean([x.logp.mean() for x in self.replay_memory.episodes]):.2f}")
-            print(f" > Mean critic loss: {np.mean(critic_losses):.2f}")
+            print(f" > Mean reward: {mean([x.rew.sum() for x in self.replay_memory.episodes]):.2f}")
+            print(f" > Mean logp: {mean([x.logp.mean() for x in self.replay_memory.episodes]):.2f}")
+            print(f" > Mean critic loss: {mean(critic_losses):.2f}")
             print(f" > Mean val {mean_val:.4f}")
             print(f" > Mean pi clip frac: {mean_clip_frac:.2f}")
             print(f" > KL est: {terminal_kl:.3f} -->  {kl_after:.3f}")

@@ -16,15 +16,18 @@ def discount_rewards(rewards, gamma):
         discounted_rewards[ix] = c0
     return discounted_rewards
 
-@torch.jit.script
-def discount_rewards_tensor(rewards, gamma):
+# @torch.jit.script
+def _discount_rewards_tensor(rewards, gamma):
     discounted_rewards = torch.zeros_like(rewards)
-    c0 = torch.tensor(0, dtype=torch.float32).to(rewards.device)
+    c0 = 0*discounted_rewards[0]
     for ix in range(len(rewards)-1, -1, -1):
         c0 = rewards[ix] + gamma * c0
         discounted_rewards[ix] = c0
     return discounted_rewards
 
+def discount_rewards_tensor(rewards, gamma):
+    return rewards.new_tensor(discount_rewards(rewards.cpu().numpy(), gamma.cpu().item()))
+# discount_rewards_tensor = torch.jit.script(_discount_rewards_tensor)
 # discount_rewards_tensor = torch.jit.trace(
 #     _discount_rewards_tensor,
 #     (torch.tensor([1,2,3,4,5],dtype=torch.float32),
