@@ -14,7 +14,7 @@ import gym
 from kamarl.modules import ConvNet, SeqLSTM, make_mlp, device_of
 from kamarl.buffers import RecurrentReplayMemory, init_array_recursive
 from kamarl.agents import Agent
-from kamarl.utils import space_to_dict, dict_to_space, get_module_inputs, chunked_iterable, discount_rewards
+from kamarl.utils import space_to_dict, dict_to_space, get_module_inputs, chunked_iterable, discount_rewards, discount_rewards_tensor
 
 import copy
 
@@ -37,8 +37,8 @@ class PPOLSTM(nn.Module):
             {'out_channels': 16, 'kernel_size': 3, 'stride': 1, 'padding': 0},
             {'out_channels': 16, 'kernel_size': 3, 'stride': 1, 'padding': 0},
         ],
-        'input_trunk_layers': [192],
-        'lstm_hidden_size': 192,
+        'input_trunk_layers': [192,192],
+        'lstm_hidden_size': 256,
         'val_mlp_layers': [64,64],
         'pi_mlp_layers': [64,64],
     }
@@ -351,11 +351,11 @@ class PPOAgent(Agent):
 
         return a
 
-    def save_step(self, obs, act, rew, done):
+    def save_step(self, obs, act, rew, done, ignore_step=False):
         """ 
         Save an environment transition.
         """
-
+        
         def decollate(val, ix):
             if isinstance(val, dict):
                 return {k: decollate(v, ix) for k,v in val.items()}
@@ -371,14 +371,6 @@ class PPOAgent(Agent):
         self.logged_rewards[-1] += rew*still_going
         self.logged_lengths[-1] += still_going
 
-        # rew_tmp = np.array(rew)
-        # rew_streak = getattr(self, 'rew_streak', np.zeros_like(rew_tmp))
-        # best_streak = getattr(self, 'best_streak', np.zeros_like(rew_tmp))
-        # rew_streak = (rew_streak + 1.*(rew_tmp>0))*(rew_tmp>=0)
-
-        # self.best_streak = np.maximum(rew_streak, best_streak)
-        # self.rew_streak = rew_streak
-        
         if self.training:
             save_dict = {
                 'obs': obs, 'act': act, 'rew': rew, 'done': done,
@@ -391,7 +383,7 @@ class PPOAgent(Agent):
                     else:
                         ep.append({k: decollate(v,i) for k,v in save_dict.items()})
 
-    def refresh_stale(self, episodes, parallel=32, refresh_hidden=True, refresh_adv=True, return_mse=False):
+    def refresh_stale(self, episodes, parallel=32, refresh_hidden=True, refresh_adv=True, return_mse=False, torch_mode=False):
         with torch.no_grad():
             update_sum_err = 0
             update_value_count = 0
@@ -409,20 +401,27 @@ class PPOAgent(Agent):
                                 tgt = tgt[k]
                                 src = src[k]
                             k = key_path[-1]
-                            tgt[k][i,:len(src[k]),...] = torch.from_numpy(src[k])
+                            if isinstance(src[k], np.ndarray):
+                                tgt[k][i,:len(src[k]),...] = torch.from_numpy(src[k])
+                            else:
+                                tgt[k][i,:len(src[k]),...] = src[k]
                         else:
-                            tgt[i,:len(src),...] = torch.from_numpy(src)
-                
+                            if isinstance(src, np.ndarray):
+                                tgt[i,:len(src),...] = torch.from_numpy(src)
+                            else:
+                                tgt[i,:len(src),...] = src
+
                 # Transpose below changes from (hx/cx, ep/batch, seq, hid)
                 # to (ep/batch, seq, hx/cx, hid)
                 _, new_values, new_hiddens = self.ac.pi_v(data, hx=None, return_hidden=True)
                 new_hiddens = new_hiddens.permute(1, 2, 0, 3)
 
-                if refresh_hidden and isinstance(ep['hx_cx'], np.ndarray):
-                    new_hiddens = new_hiddens.cpu().numpy()
+                if not torch_mode:
+                    if refresh_hidden and isinstance(ep['hx_cx'], np.ndarray):
+                        new_hiddens = new_hiddens.cpu().numpy()
 
-                if refresh_adv and isinstance(ep['val'], np.ndarray):
-                    new_values = new_values.cpu().numpy()
+                    if refresh_adv and isinstance(ep['val'], np.ndarray):
+                        new_values = new_values.cpu().numpy()
 
                 for i, ep in enumerate(episodes):
                     if return_mse:
@@ -441,20 +440,35 @@ class PPOAgent(Agent):
     def calculate_advantages(self, episode, last_val=0):
         ''' Populate advantages and returns in an episode. '''
         hp = self.learning_config
-        rew = np.append(episode.rew, last_val)
-        vals = np.append(episode.val, last_val)
 
-        deltas = rew[:-1] + hp['gamma'] * (vals[1:] - vals[:-1])
-        episode['adv',:] = discount_rewards(deltas, hp['gamma']*hp['lambda'])
-        episode['ret',:] = discount_rewards(rew, hp['gamma'])[:-1]
+        if episode.tensor_mode:
+            rew = torch.cat((episode.rew, episode.rew.new_tensor([last_val])))
+            vals = torch.cat((episode.val, episode.val.new_tensor([last_val])))
+            deltas = rew[:-1] + hp['gamma'] * (vals[1:] - vals[:-1])
+            episode['adv',:] = discount_rewards_tensor(deltas, deltas.new_tensor(hp['gamma']*hp['lambda']))
+            episode['ret',:] = discount_rewards_tensor(rew, rew.new_tensor(hp['gamma']))[:-1]
+        else:
+            rew = np.append(episode.rew, np.array(last_val, dtype=episode.rew.dtype))
+            vals = np.append(episode.val, np.array(last_val, dtype=episode.val.dtype))
+            deltas = rew[:-1] + hp['gamma'] * (vals[1:] - vals[:-1])
+            episode['adv',:] = discount_rewards(deltas, hp['gamma']*hp['lambda'])
+            episode['ret',:] = discount_rewards(rew, hp['gamma'])[:-1]
+
         return episode
 
     def normalize_advantages(self):
-        advantages = np.concatenate([ep.adv for ep in self.replay_memory.episodes])
-        adv_mean = advantages.mean()
-        adv_std = advantages.std()
-        for ep in self.replay_memory.episodes:
-            ep['adv',:] = (ep['adv',:] - adv_mean) / adv_std
+        if self.replay_memory.episodes[0].tensor_mode:
+            advantages = torch.cat(tuple(ep.adv for ep in self.replay_memory.episodes))
+            adv_mean = advantages.mean()
+            adv_std = advantages.std()
+            for ep in self.replay_memory.episodes:
+                ep['adv',:] = (ep['adv',:] - adv_mean) / adv_std
+        else:
+            advantages = np.concatenate([ep.adv for ep in self.replay_memory.episodes])
+            adv_mean = advantages.mean()
+            adv_std = advantages.std()
+            for ep in self.replay_memory.episodes:
+                ep['adv',:] = (ep['adv',:] - adv_mean) / adv_std
 
     def compute_loss(self, data):
         mask = data['done'].cumsum(1).cumsum(1)<=1
@@ -505,13 +519,17 @@ class PPOAgent(Agent):
 
     def sample_replay_buffer(self, batch_size, seq_len):
         data = self.replay_memory.sample_sequence(batch_size=batch_size, seq_len=seq_len)
-        # ignore hiddens after the first before sending to GPU.
-        data['hx_cx'] = np.moveaxis(data['hx_cx'][:,0], -2, 0)
-        def to_tensor(x):
-            if isinstance(x, dict):
-                return {k: to_tensor(v) for k,v in x.items()}
-            return torch.from_numpy(x).to(self.device)
-        return to_tensor(data)
+        if self.replay_memory.episodes[0].tensor_mode:
+            data['hx_cx'] = data['hx_cx'][:,0,...].transpose(-2,0)
+            return data
+        else:
+            # ignore hiddens after the first before sending to GPU.
+            data['hx_cx'] = np.moveaxis(data['hx_cx'][:,0,...], -2, 0)
+            def to_tensor(x):
+                if isinstance(x, dict):
+                    return {k: to_tensor(v) for k,v in x.items()}
+                return torch.from_numpy(x).to(self.device)
+            return to_tensor(data)
                 
 
     def optimize(self):
@@ -549,6 +567,9 @@ class PPOAgent(Agent):
 
             self.normalize_advantages()
             self.ac.train()
+
+            for episode in self.replay_memory.episodes:
+                episode.to_tensor(device=device)
 
             n_minibatches = 0
             for i in range(hp['num_minibatches']):
@@ -666,9 +687,9 @@ class PPOAgent(Agent):
 
     def start_episode(self, n_parallel=None):
         self.n_parallel = n_parallel
-        self.ep_act_hist = np.zeros(self.action_space.n,dtype='int')
         self.reset_hidden()
         self.reset_state()
+
         
         self.episode_reward_streaks = np.zeros(n_parallel) 
         self.logged_reward_counts.append(np.zeros(n_parallel))
@@ -700,22 +721,13 @@ class PPOAgent(Agent):
                     'total_reward': episode_reward,
                 },
             )
-        # self.logged_prestige += [getattr(self.obj, 'prestige', np.nan)re]
-        # self.logged_rewards += [e.rew.sum() for e in self.active_episodes]
-        # self.logged_lengths += [len(e) for e in self.active_episodes]
-        # print("BEST STREAK IS ", self.best_streak)
-        # self.logged_streaks += [self.best_streak]
-
-        # del self.rew_streak
-        # del self.best_streak
 
         for ep in self.active_episodes:
-            self.calculate_advantages(ep)
             ep.freeze()
+            self.calculate_advantages(ep)
             self.replay_memory.add_episode(ep)
-        # self.replay_memory.end_episode()
+
         self.counts['episodes'] += len(self.active_episodes)
-        self.counts['episode_step'] = 0
 
         if len(self.replay_memory.episodes) >= self.learning_config['batch_size']:
             self.optimize()

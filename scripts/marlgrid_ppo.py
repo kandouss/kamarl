@@ -17,8 +17,8 @@ from marlgrid.utils.video import GridRecorder
 
 
 run_time = datetime.datetime.now().strftime("%m_%d_%H:%M:%S")
-device = find_cuda_device('1080 Ti')[1]
-# device = torch.device('cpu')
+# device = find_cuda_device('1080 Ti')[1]
+device = torch.device('cpu')
 
 save_root = os.path.abspath(os.path.expanduser(f'/tmp/marlgrid_ppo_refactor/{run_time}'))
 
@@ -32,7 +32,6 @@ env_config = {
     'max_steps': 150,
     'clutter_density': 0.2,
     'respawn': True,
-    'done_condition': 'all',
     'ghost_mode': True,
     'reward_decay': False, # default true.
 }
@@ -40,11 +39,10 @@ env_config = {
 # Config for a cluttered goal cycle environment
 env_config = {
     'env_class': 'ClutteredGoalCycleEnv',
-    'grid_size': 20,
+    'grid_size': 13,
     'max_steps': 300,
     'clutter_density': 0.2,
     'respawn': True,
-    'done_condition': 'all',
     'ghost_mode': True,
     'reward_decay': False, # default true.
     'n_bonus_tiles': 3,
@@ -54,19 +52,20 @@ env_config = {
 
 agent_interface_config = {
     'view_tile_size': 3,
-    'view_size': 9,
+    'view_size': 7,
     'view_offset': 3,
     'observation_style': 'rich',
     'prestige_beta': 0.95, # determines the rate at which prestige decays
     'color': 'prestige',
+    'spawn_delay': 100,
 }
 
 ppo_learning_config = {
     "batch_size": 8,
-    'num_minibatches': 30,
+    'num_minibatches': 10,
     "minibatch_size": 256,
     "minibatch_seq_len": 8,
-    "hidden_update_interval": 2,
+    "hidden_update_interval": 10,
 
     'learning_rate': 1.e-4, # 1.e-3, #
     "kl_target":  0.01,
@@ -137,12 +136,12 @@ wbl = None
 #     'env_params': env_config,
 #     'hparams': agents[0].hyperparams})
 
-env = GridRecorder(
-    env,
-    max_steps=env_config['max_steps']+1,
-    save_root=save_root,
-    auto_save_interval=100,
-)
+# env = GridRecorder(
+#     env,
+#     max_steps=env_config['max_steps']+1,
+#     save_root=save_root,
+#     auto_save_interval=100,
+# )
 
 
 
@@ -154,6 +153,8 @@ for ep_num in range(num_episodes):
     done = False
     with agents.episode():
         with torch.set_grad_enabled(False):
+            if ep_num >0 and ep_num % 1000==0:
+                import pdb; pdb.set_trace()
             ep_start_time = time.time()
 
             ep_steps = 0
@@ -163,10 +164,10 @@ for ep_num in range(num_episodes):
             while not done:
                 # Get an action for each agent.
                 # action_array = [agent.action_space.sample() for agent in agents]
+
                 action_array = agents.action_step(obs_array)
 
                 next_obs_array, reward_array, done_array, _ = env.step(action_array)
-
 
                 total_reward += reward_array.sum()
                 ep_reward += reward_array.sum()
@@ -174,14 +175,16 @@ for ep_num in range(num_episodes):
                 agents.save_step(obs_array, action_array, reward_array, done_array)
 
                 obs_array = next_obs_array
-                done = all(done_array) if not np.isscalar(done_array) else done_array
+                done = np.array(done_array).all()
 
-                ep_steps += 1
-                total_steps += 1
                 
+                # print(ep_steps, tuple(action_array))
                 # time.sleep(0.1)
                 # env.render(show_agent_views=True)
                 # input()
+
+                ep_steps += 1
+                total_steps += 1
 
 
             ep_time = time.time() - ep_start_time

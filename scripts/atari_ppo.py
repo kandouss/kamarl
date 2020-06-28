@@ -12,10 +12,34 @@ from kamarl.logging import WandbLogger
 from marlgrid.utils.video import GridRecorder
 import gym
 
+class ImageShrinker(gym.ObservationWrapper):
+    def __init__(self, env, factor=2):
+        super().__init__(env)
+        if not isinstance(env.observation_space, gym.spaces.Box):
+            raise ValueError("Can only shrink (downsample) plain images.")
+        old_os = env.observation_space
+        self.factor = factor
+        self.observation_space = gym.spaces.Box(
+            low=np.take(old_os.low, 0),
+            high=np.take(old_os.high, 0),
+            shape=self.observation(old_os.sample()).shape,
+            dtype=old_os.dtype)
+
+    def observation(self, img):
+        return img[self.factor//2::self.factor, self.factor//2::self.factor, :]
+        # img = img[:self.factor*(img.shape[0]//self.factor), :self.factor*(img.shape[1]//self.factor)]
+        # return img.reshape((img.shape[0]//self.factor, self.factor, img.shape[1]//self.factor, self.factor, 3)).mean(axis=(1,3)).astype(self.observation_space.dtype)
+    
+    def render(self, *args, **kwargs):
+        return self.observation(self.env.render(*args, **kwargs))
+
+
 run_time = datetime.datetime.now().strftime("%m_%d_%H:%M:%S")
 
 env = gym.make('Breakout-v4')
-save_root = f'/fast/atari_ppo_test/{run_time}'
+save_root = f'/tmp/atari_ppo_test/{run_time}'
+
+env = ImageShrinker(env, factor=3)
 
 env = GridRecorder(
     env,
@@ -23,45 +47,51 @@ env = GridRecorder(
     save_root=save_root,
     auto_save_interval=500
 )
+ppo_learning_config = {
+    "batch_size": 8,
+    'num_minibatches': 10,
+    "minibatch_size": 256,
+    "minibatch_seq_len": 8,
+    "hidden_update_interval": 2,
 
-agent = PPOAgent(env.observation_space, env.action_space,
-    grid_mode=False,
-    hyperparams = {
-        'learning_rate': 1.e-4,
-        'num_minibatches': 25,
-        "minibatch_size": 256,
-        'minibatch_seq_len': 8,
-        "batch_size": 10,
-        "hidden_update_n_parallel": 2,
+    'learning_rate': 1.e-4, # 1.e-3, #
+    "kl_target":  0.01,
+    "clamp_ratio": 0.2,
+    "lambda":0.97,
+    "gamma": 0.99,
+    'entropy_bonus_coef': 0.0,#0001,
+    'value_loss_coef': 1.0,
+}
 
-        'max_episode_length': 5000,
+ppo_model_config = {
+    "conv_layers" : [
+        {'out_channels': 8, 'kernel_size': 3, 'stride': 3, 'padding': 0},
+        {'out_channels': 16, 'kernel_size': 3, 'stride': 2, 'padding': 0},
+        {'out_channels': 32, 'kernel_size': 3, 'stride': 2, 'padding': 0},
+        {'out_channels': 64, 'kernel_size': 3, 'stride': 2, 'padding': 0},
+    ],
+    'input_trunk_layers': [192],
+    'lstm_hidden_size': 192,
+    'val_mlp_layers': [64,64],
+    'pi_mlp_layers': [64,64],
+}
 
-        'entropy_bonus_coef': 0.0,
-        
 
-        'module_hyperparams': {
-            'conv_layers': [
-                    {'out_channels': 1, 'kernel_size': 3, 'stride': 3, 'padding': 0},
-                    {'out_channels': 8, 'kernel_size': 3, 'stride': 2, 'padding': 0},
-                    {'out_channels': 16, 'kernel_size': 3, 'stride': 2, 'padding': 0},
-                    {'out_channels': 32, 'kernel_size': 3, 'stride': 2, 'padding': 0},
-            ],
-            'input_trunk_layers': [256],
-            'lstm_hidden_size': 256,
-            'val_mlp_layers': [128],
-            'pi_mlp_layers': [128],
-        }
-    }
+agent = PPOAgent(
+    observation_space = env.observation_space,
+    action_space = env.action_space,
+    learning_config = ppo_learning_config,
+    model_config = ppo_model_config,
 )
 
-device = find_cuda_device('1080 Ti')[1]
-# device = find_cuda_device('1070')
+# device = find_cuda_device('1080 Ti')[1]
+device = torch.device('cpu')
 
-print(count_parameters(agent.ac))
+print(f"Agent has {count_parameters(agent.ac)} parameters.")
 
 
-# wbl = WandbLogger(name='atari_test', project='atari_ppo_test')
-# agent.set_logger(wbl)
+wbl = WandbLogger(name='atari_test_laptop', project='atari_ppo_test')
+agent.set_logger(wbl)
 
 agent.set_device(device)
 

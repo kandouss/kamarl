@@ -7,16 +7,29 @@ import numba
 from baselines.common.vec_env import VecEnv
 
 
-@numba.jit#(numba.float32[:](numba.float32[:], numba.float32))
+@numba.njit(numba.float32[:](numba.float32[:], numba.float32))
 def discount_rewards(rewards, gamma):
-    discounted_rewards = 0*rewards
+    discounted_rewards = np.zeros_like(rewards)
     c0 = 0.0
-    ix = len(rewards)-1
-    for x in rewards[::-1]:
-        c0 = x + gamma * c0
+    for ix in range(len(rewards)-1, -1, -1):
+        c0 = rewards[ix] + gamma * c0
         discounted_rewards[ix] = c0
-        ix -= 1
     return discounted_rewards
+
+@torch.jit.script
+def discount_rewards_tensor(rewards, gamma):
+    discounted_rewards = torch.zeros_like(rewards)
+    c0 = torch.tensor(0, dtype=torch.float32).to(rewards.device)
+    for ix in range(len(rewards)-1, -1, -1):
+        c0 = rewards[ix] + gamma * c0
+        discounted_rewards[ix] = c0
+    return discounted_rewards
+
+# discount_rewards_tensor = torch.jit.trace(
+#     _discount_rewards_tensor,
+#     (torch.tensor([1,2,3,4,5],dtype=torch.float32),
+#     torch.tensor(0.2))
+# )
 
 
 def count_parameters(mod):
