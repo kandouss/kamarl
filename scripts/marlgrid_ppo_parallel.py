@@ -19,13 +19,13 @@ from baselines.common.vec_env.subproc_vec_env import SubprocVecEnv
 
 
 run_time = datetime.datetime.now().strftime("%m_%d_%H:%M:%S")
-device = find_cuda_device('1080 Ti')[1]
-# device = torch.device('cpu')
+# device = find_cuda_device('1080 Ti')[1]
+device = torch.device('cpu')
 
-save_root = os.path.abspath(os.path.expanduser(f'/tmp/marlgrid_ppo_refactor/{run_time}'))
+save_root = os.path.abspath(os.path.expanduser(f'/tmp/marlgrid_ppo_parallel/{run_time}'))
 
 experiment_config = {
-    'n_parallel_envs': 16, # set this to None in order to disable subprocess environment vectorization.
+    'n_parallel_envs': 8, # set this to None in order to disable subprocess environment vectorization.
     'total_episodes': int(1e6),
     'checkpoint_interval': 8192/2, # episodes.
     'recording_interval': 100,
@@ -36,11 +36,10 @@ experiment_config = {
 env_config = {
     'env_class': 'ClutteredMultiGrid',
 
-    'grid_size': 9,
+    'grid_size': 14,
     'max_steps': 150,
     'clutter_density': 0.2,
     'respawn': True,
-    'done_condition': 'all',
     'ghost_mode': True,
     'reward_decay': False, # default true.
 }
@@ -48,35 +47,34 @@ env_config = {
 # Config for a cluttered goal cycle environment
 env_config = {
     'env_class': 'ClutteredGoalCycleEnv',
-    'grid_size': 9,
-    'max_steps': 150,
-    'clutter_density': 0.2,
+    'grid_size': 15,
+    'max_steps': 200,
+    'clutter_density': 0.1,
     'respawn': True,
-    'done_condition': 'all',
     'ghost_mode': True,
     'reward_decay': False, # default true.
-    'n_bonus_tiles': 3,
+    'n_bonus_tiles': 2,
     'initial_reward': True,
     'penalty': -0.5,
 }
 
 agent_interface_config = {
     'view_tile_size': 3,
-    'view_size': 9,
-    'view_offset': 3,
+    'view_size': 7,
+    'view_offset': 1,
     'observation_style': 'rich',
     'prestige_beta': 0.95, # determines the rate at which prestige decays
     'color': 'prestige',
 }
 
 ppo_learning_config = {
-    "batch_size": 32,
+    "batch_size": 16,
     'num_minibatches': 30,
     "minibatch_size": 256,
     "minibatch_seq_len": 8,
-    "hidden_update_interval": 2,
+    "hidden_update_interval": 5,
 
-    'learning_rate': 1.e-4, # 1.e-3, #
+    'learning_rate': 1.e-3, # 1.e-3, #
     "kl_target":  0.01,
     "clamp_ratio": 0.2,
     "lambda":0.97,
@@ -90,15 +88,16 @@ ppo_model_config = {
         {'out_channels': 8, 'kernel_size': 3, 'stride': 3, 'padding': 0},
         {'out_channels': 16, 'kernel_size': 3, 'stride': 1, 'padding': 0},
         {'out_channels': 16, 'kernel_size': 3, 'stride': 1, 'padding': 0},
+        {'out_channels': 16, 'kernel_size': 3, 'stride': 1, 'padding': 0},
     ],
-    'input_trunk_layers': [192],
-    'lstm_hidden_size': 192,
-    'val_mlp_layers': [64,64],
-    'pi_mlp_layers': [64,64],
+    'input_trunk_layers': [64],
+    'lstm_hidden_size': 64,
+    'val_mlp_layers': [16,16],
+    'pi_mlp_layers': [16,16],
 }
 
 load_agents = [] # List of save paths of already-made agents to load into the env
-n_new_agents = 2 # Number of new agents to be created with the above config/hyperparameters.
+n_new_agents = 6 # Number of new agents to be created with the above config/hyperparameters.
 
 
 grid_agents = []
@@ -132,19 +131,19 @@ print(f"Agents have {count_parameters(agents.agents[0].ac)} parameters.")
 
 
 # Quick save/load test
-agents[0].save('/tmp/agent_save_test', force=True)
-loaded_agent = PPOAgent.load('/tmp/agent_save_test')
+# agents[0].save('/tmp/agent_save_test', force=True)
+# loaded_agent = PPOAgent.load('/tmp/agent_save_test')
 
 
-assert agents[0] is not loaded_agent
-for mod_name in ['ac']:
-    saved_weights = getattr(agents[0], mod_name).state_dict()
-    loaded_weights = getattr(loaded_agent, mod_name).state_dict()
-    for k,v in saved_weights.items():
-        w1 = v.cpu()
-        w2 = loaded_weights[k].cpu()
-        assert((w1==w2).all())
-agents.agents[0] = loaded_agent
+# assert agents[0] is not loaded_agent
+# for mod_name in ['ac']:
+#     saved_weights = getattr(agents[0], mod_name).state_dict()
+#     loaded_weights = getattr(loaded_agent, mod_name).state_dict()
+#     for k,v in saved_weights.items():
+#         w1 = v.cpu()
+#         w2 = loaded_weights[k].cpu()
+#         assert((w1==w2).all())
+# agents.agents[0] = loaded_agent
 
 
 def make_environment(agents, experiment_config, env_config, seed_bump=0):
@@ -233,7 +232,7 @@ while ep_num < experiment_config['total_episodes']:
     agents.end_episode()
 
     if isinstance(env, GridRecorder) and env.recording:
-        env.export_both(save_root=os.path.join(save_root, 'recordings'), ident=f'episode_{ep_num}')
+        env.export_both(save_root=os.path.join(save_root, 'recordings'), episode_id=f'episode_{ep_num}')
         last_recorded = ep_num
         env.recording = False
     

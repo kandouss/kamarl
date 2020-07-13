@@ -30,13 +30,13 @@ class ImageShrinker(gym.ObservationWrapper):
         # img = img[:self.factor*(img.shape[0]//self.factor), :self.factor*(img.shape[1]//self.factor)]
         # return img.reshape((img.shape[0]//self.factor, self.factor, img.shape[1]//self.factor, self.factor, 3)).mean(axis=(1,3)).astype(self.observation_space.dtype)
     
-    def render(self, *args, **kwargs):
-        return self.observation(self.env.render(*args, **kwargs))
+    # def render(self, *args, **kwargs):
+    #     return self.observation(self.env.render(*args, **kwargs))
 
 
 run_time = datetime.datetime.now().strftime("%m_%d_%H:%M:%S")
 
-env = gym.make('Breakout-v4')
+env = gym.make('Breakout-v0')
 save_root = f'/tmp/atari_ppo_test/{run_time}'
 
 env = ImageShrinker(env, factor=3)
@@ -49,18 +49,18 @@ env = GridRecorder(
 )
 ppo_learning_config = {
     "batch_size": 8,
-    'num_minibatches': 10,
+    'num_minibatches': 100,
     "minibatch_size": 256,
     "minibatch_seq_len": 8,
-    "hidden_update_interval": 2,
+    "hidden_update_interval": 4,
 
     'learning_rate': 1.e-4, # 1.e-3, #
     "kl_target":  0.01,
-    "clamp_ratio": 0.2,
+    "clamp_ratio": 0.15,
     "lambda":0.97,
-    "gamma": 0.99,
-    'entropy_bonus_coef': 0.0,#0001,
-    'value_loss_coef': 1.0,
+    "gamma": 0.997,
+    'entropy_bonus_coef': 0.003,#0001,
+    'value_loss_coef': 0.25,
 }
 
 ppo_model_config = {
@@ -70,10 +70,10 @@ ppo_model_config = {
         {'out_channels': 32, 'kernel_size': 3, 'stride': 2, 'padding': 0},
         {'out_channels': 64, 'kernel_size': 3, 'stride': 2, 'padding': 0},
     ],
-    'input_trunk_layers': [192],
-    'lstm_hidden_size': 192,
+    'input_trunk_layers': [128],
+    'lstm_hidden_size': 128,
     'val_mlp_layers': [64,64],
-    'pi_mlp_layers': [64,64],
+    'pi_mlp_layers': [16,16],
 }
 
 

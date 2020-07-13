@@ -5,7 +5,7 @@ import torch.nn as nn
 import datetime, time
 import os
 
-from kamarl.ppo import PPOAgent
+from kamarl.ppo_rec import PPOAEAgent
 from kamarl.utils import find_cuda_device, count_parameters
 from kamarl.agents import IndependentAgents
 from kamarl.logging import WandbLogger
@@ -53,7 +53,7 @@ env_config = {
 agent_interface_config = {
     'view_tile_size': 3,
     'view_size': 7,
-    'view_offset': 3,
+    'view_offset': 1,
     'observation_style': 'rich',
     'prestige_beta': 0.95, # determines the rate at which prestige decays
     'color': 'prestige',
@@ -101,12 +101,12 @@ new_agents_info = [
 grid_agents = []
 
 for agent_load_path in load_agents:
-    grid_agents.append(PPOAgent.load(agent_load_path))
+    grid_agents.append(PPOAEAgent.load(agent_load_path))
 
 
 for agent_info in new_agents_info:
     iface = GridAgentInterface(**agent_info['interface_config'])
-    new_fella = PPOAgent(
+    new_fella = PPOAEAgent(
         observation_space=iface.observation_space,
         action_space=iface.action_space, 
         learning_config=agent_info['learning_config'],
@@ -153,8 +153,8 @@ for ep_num in range(num_episodes):
     done = False
     with agents.episode():
         with torch.set_grad_enabled(False):
-            if ep_num >0 and ep_num % 1000==0:
-                import pdb; pdb.set_trace()
+            # if ep_num >0 and ep_num % 1000==0:
+            #     import pdb; pdb.set_trace()
             ep_start_time = time.time()
 
             ep_steps = 0
