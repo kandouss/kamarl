@@ -164,13 +164,14 @@ class Agent(RLAgentBase):
         json.dump(self._save_state, open(metadata_path, "w"))
 
     @classmethod
-    def load(cls, save_dir, device=None):
+    def load(cls, save_dir, config_changes = {}, device=None):
         print(f"Loading", cls.__name__)
         save_dir = os.path.abspath(os.path.expanduser(save_dir))
         model_path = os.path.join(save_dir, 'model.tar')
         metadata_path = os.path.join(save_dir, 'metadata.json')
 
         metadata = json.load(open(metadata_path,'r'))
+        metadata = {**metadata, **config_changes}
 
         if metadata['class'] != cls.__name__:
             warnings.warn(f"Attempting to load a {cls.__name__} from a {metadata['class']} checkpoint.")

@@ -74,12 +74,12 @@ class PPOLSTM(nn.Module):
 
         in_channels = 3 # todo: infer number of image channels from observation space shape.
         conv_layers = [
-            # PixelDropout(0.1)
+            # PixelDropout(0.05)
         ]
         for k,c in enumerate(self.config['conv_layers']):
             conv_layers.append(nn.Conv2d(in_channels, **c))
             # if k == 0:
-            #     conv_layers.append(PixelDropout(0.1))
+                # conv_layers.append(PixelDropout(0.05))
             in_channels = c['out_channels']
             if k < len(self.config['conv_layers']) - 1:
                 conv_layers.append(nn.ReLU(inplace=True))
@@ -114,7 +114,7 @@ class PPOLSTM(nn.Module):
             nonlinearity=nn.Tanh,
             output_nonlinearity=None
         )
-
+    
     def empty_hidden(self, numpy=False):
         if numpy:
             return np.zeros((2, self.config['lstm_hidden_size']), dtype=np.float32)
@@ -211,6 +211,7 @@ class PPOAgent(Agent):
             'entropy_bonus_coef': 0.001,
             'value_loss_coef': 0.5,
             "gamma": 0.99,
+            "bootstrap_values": True,
     }
     default_model_config = {
         # The default values for the model configuration are set 
@@ -452,16 +453,19 @@ class PPOAgent(Agent):
             if return_mse:
                 return update_sum_err/update_value_count
 
-    def calculate_advantages(self, episode, last_val=0):
+    def calculate_advantages(self, episode):
         ''' Populate advantages and returns in an episode. '''
         hp = self.learning_config
+        if hp['bootstrap_values']:
+            last_val = episode.val[-1]
+        else:
+            last_val = 0
 
         if episode.tensor_mode:
             rew = torch.cat((episode.rew, episode.rew.new_tensor([last_val])))
             vals = torch.cat((episode.val, episode.val.new_tensor([last_val])))
             deltas = rew[:-1] + hp['gamma'] * (vals[1:] - vals[:-1])
             episode['adv',:] = discount_rewards_tensor(deltas, deltas.new_tensor(hp['gamma']*hp['lambda']))
-
             episode['ret',:] = discount_rewards_tensor(rew, rew.new_tensor(hp['gamma']))[:-1]
         else:
             rew = np.append(episode.rew, np.array(last_val, dtype=episode.rew.dtype))
@@ -501,7 +505,6 @@ class PPOAgent(Agent):
         loss_pi = -((torch.min(ratio * data['adv'], clip_adv))*mask).sum()/N
 
         loss_val = (((v_theta.squeeze() - data['ret'])**2)*mask).sum()/N
-
         approx_kl = (((data['logp'] - logp)*mask).sum()/N)
 
         loss_ent = - pi.entropy().sum()/N

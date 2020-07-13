@@ -40,8 +40,8 @@ class PixelDropout(nn.Module):
         self.p = p
         self.dim = dim
     def forward(self, img):
-        if not self.training:
-            return img
+        # if not self.training:
+        #     return img
         mask_size = list(img.shape)
         mask_size[self.dim] = 1
         return img*(torch.rand(mask_size, dtype=torch.float, device=img.device)>self.p)
