@@ -90,6 +90,52 @@ class ConvNet(nn.Module):
         else:
             return X
 
+class DeconvNet(nn.Module):
+    def __init__(self, *modules, n_latent=128, image_size=(64,64,3)):
+        super().__init__()
+        self.image_size = image_size
+
+        self.dc_shape = self._get_input_size(image_size, modules)
+        self.fc = nn.Linear(n_latent, int(np.prod(self.dc_shape)))
+        self.ll = nn.ReLU(inplace=True)
+        self.mods = nn.Sequential(*modules)
+        print(f"DECONV FC is {self.fc}")
+        print(f"   DC SHAPE  {self.dc_shape}")
+
+    def forward(self, X):
+        in_shape = [-1, *self.dc_shape]
+        out_shape = [*X.shape[:-1],*self.image_size]
+        X = self.ll(self.fc(X).reshape(in_shape))
+        X = self.mods(X)
+
+        extra_dims = len(X.shape) - 3
+        if X.shape[-3] == 3:
+            X = X.permute(*range(extra_dims), -2,-1,-3)
+        return X[..., :self.image_size[0], :self.image_size[1],:].reshape(out_shape)
+        
+        
+    @staticmethod
+    def _get_input_size(image_size, deconvs):
+        w,h = sorted(image_size, reverse=True)[:2]
+        # nc = None
+        for layer in deconvs[::-1]:
+            if not isinstance(layer, nn.ConvTranspose2d):
+                continue
+            w = (w - layer.kernel_size[0] + 2*layer.padding[0])//layer.stride[0] + 1
+            h = (h - layer.kernel_size[1] + 2*layer.padding[1])//layer.stride[1] + 1
+            nc = layer.in_channels
+        return (nc,w,h)
+
+# mods = [
+#     nn.ConvTranspose2d(4, 16, kernel_size=3, stride=1),
+#     nn.ConvTranspose2d(16, 16, kernel_size=3, stride=1),
+#     nn.ConvTranspose2d(16, 16, kernel_size=3, stride=1),
+#     nn.ConvTranspose2d(16, 3, kernel_size=3, stride=2),
+# ]
+# # ret = DeconvNet._get_input_size((64,64), mods)
+# ret = DeconvNet(*mods)
+# print(ret(torch.randn(128)).shape)
+
 
 @torch.jit.script
 def lstm_forward(X, hx, weight_ih, weight_hh, bias_ih, bias_hh):
