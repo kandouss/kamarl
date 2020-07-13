@@ -135,7 +135,10 @@ class DeconvNet(nn.Module):
     def forward(self, X):
         in_shape = [-1, *self.dc_shape]
         out_shape = [*X.shape[:-1],*self.image_size]
-        X = self.ll(self.fc(X).reshape(in_shape))
+        try:
+            X = self.ll(self.fc(X).reshape(in_shape))
+        except:
+            import pdb; pdb.set_trace()
         X = self.mods(X)
 
         extra_dims = len(X.shape) - 3

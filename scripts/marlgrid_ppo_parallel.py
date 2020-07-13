@@ -5,7 +5,7 @@ import torch.nn as nn
 import datetime, time
 import os
 
-from kamarl.ppo import PPOAgent
+from kamarl.ppo_rec import PPOAEAgent
 from kamarl.utils import find_cuda_device, count_parameters, MultiParallelWrapper, DumberVecEnv    
 from kamarl.agents import IndependentAgents
 from kamarl.logging import WandbLogger
@@ -19,8 +19,10 @@ from baselines.common.vec_env.subproc_vec_env import SubprocVecEnv
 
 
 run_time = datetime.datetime.now().strftime("%m_%d_%H:%M:%S")
-# device = find_cuda_device('1080 Ti')[1]
-device = torch.device('cpu')
+try:
+    device = find_cuda_device('1080 Ti')[0]
+except:
+    device = torch.device('cpu')
 
 save_root = os.path.abspath(os.path.expanduser(f'/tmp/marlgrid_ppo_parallel/{run_time}'))
 
@@ -88,16 +90,15 @@ ppo_model_config = {
         {'out_channels': 8, 'kernel_size': 3, 'stride': 3, 'padding': 0},
         {'out_channels': 16, 'kernel_size': 3, 'stride': 1, 'padding': 0},
         {'out_channels': 16, 'kernel_size': 3, 'stride': 1, 'padding': 0},
-        {'out_channels': 16, 'kernel_size': 3, 'stride': 1, 'padding': 0},
     ],
-    'input_trunk_layers': [64],
-    'lstm_hidden_size': 64,
-    'val_mlp_layers': [16,16],
-    'pi_mlp_layers': [16,16],
+    'input_trunk_layers': [192,192],
+    'lstm_hidden_size': 256,
+    'val_mlp_layers': [64,64],
+    'pi_mlp_layers': [64,64],
 }
 
 load_agents = [] # List of save paths of already-made agents to load into the env
-n_new_agents = 6 # Number of new agents to be created with the above config/hyperparameters.
+n_new_agents = 1 # Number of new agents to be created with the above config/hyperparameters.
 
 
 grid_agents = []
@@ -109,12 +110,12 @@ new_agents_info = [
 grid_agents = []
 
 for agent_load_path in load_agents:
-    grid_agents.append(PPOAgent.load(agent_load_path))
+    grid_agents.append(PPOAEAgent.load(agent_load_path))
 
 
 for agent_info in new_agents_info:
     iface = GridAgentInterface(**agent_info['interface_config'])
-    new_fella = PPOAgent(
+    new_fella = PPOAEAgent(
         observation_space=iface.observation_space,
         action_space=iface.action_space, 
         learning_config=agent_info['learning_config'],
@@ -170,12 +171,14 @@ env = make_environment(
 
 
 wbl = None
-# wbl = WandbLogger(name='ppo', project='marlgrid_stale_refreshing_test')
-# agents.set_logger(wbl)
-# wbl.log_hyperparams({
-#     'env_name': env.__class__.__name__,
-#     'env_params': env_config,
-#     'hparams': agents[0].hyperparams})
+wbl = WandbLogger(name='ppo', project='marlgrid_stale_refreshing_test')
+agents.set_logger(wbl)
+wbl.log_hyperparams({
+    'env_name': env_config['env_class'],
+    'env_params': env_config,
+    'agent_interface_config': agent_interface_config,
+    'ppo_learning_config': ppo_learning_config,
+    'ppo_model_config': ppo_model_config})
 
 last_recorded = -experiment_config['recording_interval']-1
 
