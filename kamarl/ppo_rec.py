@@ -83,7 +83,7 @@ class PPOLSTM(nn.Module):
 
         self.conv_layers = ConvNet(
             *conv_layers,
-            image_size=input_image_shape,
+            input_shape=input_image_shape,
             output_nonlinearity=nn.Tanh,
         )
 
@@ -102,14 +102,11 @@ class PPOLSTM(nn.Module):
         
 
         self.deconv_layers = DeconvNet(
-            nn.ConvTranspose2d(16, 16, kernel_size=3, padding=1),
+            nn.ConvTranspose2d(32, 32, kernel_size=3, padding=0),
             nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(16, 32, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(32, 32, kernel_size=3, padding=1),
+            nn.ConvTranspose2d(32, 32, kernel_size=3, stride=2, padding=1),
             nn.ReLU(inplace=True),
             nn.ConvTranspose2d(32, 3, kernel_size=3, stride=3),
-            nn.ReLU(inplace=True),
             n_latent=self.config['lstm_hidden_size']+action_space.n,
             image_size=input_image_shape
         )
@@ -187,14 +184,11 @@ class PPOLSTM(nn.Module):
 
     def pi_v_rec(self, X, hx, act, return_hidden=False):
         X = self.input_layers(X)
-        try:
-            hx_cx_new = self.lstm(X, hx, vec_hidden=False)
-        except:
-            import pdb; pdb.set_trace()
+        hx_cx_new = self.lstm(X, hx, vec_hidden=False)
 
         pi = torch.distributions.Categorical(logits=self.mlp_pi(hx_cx_new[0]))
         v = self.mlp_val(hx_cx_new[0])
-        rec = self.deconv_layers(torch.cat((hx_cx_new[0],F.one_hot(act).float()),dim=-1))
+        rec = self.deconv_layers(torch.cat((hx_cx_new[0],F.one_hot(act, self.action_space.n).float()),dim=-1))
         return pi, v, rec
 
     def step(self, X, hx=None):
@@ -234,7 +228,12 @@ class PPOAEAgent(Agent):
             "lambda":0.97,
             'entropy_bonus_coef': 0.001,
             'value_loss_coef': 0.5,
+            'reconstruction_loss_coef': 1.0,
+            'reconstruction_loss_loss': 'l2',
             "gamma": 0.99,
+            "bootstrap_values": True,
+
+            'save_test_image': None,
     }
     default_model_config = {
         # The default values for the model configuration are set 
@@ -469,12 +468,18 @@ class PPOAEAgent(Agent):
         ''' Populate advantages and returns in an episode. '''
         hp = self.learning_config
 
+        if hp['bootstrap_values']:
+            last_val = episode.val[-1]
+        else:
+            last_val = 0
+
+
         if episode.tensor_mode:
             rew = torch.cat((episode.rew, episode.rew.new_tensor([last_val])))
             vals = torch.cat((episode.val, episode.val.new_tensor([last_val])))
             deltas = rew[:-1] + hp['gamma'] * (vals[1:] - vals[:-1])
-            episode['adv',:] = discount_rewards_tensor(deltas, deltas.new_tensor(hp['gamma']*hp['lambda']))
-            episode['ret',:] = discount_rewards_tensor(rew, rew.new_tensor(hp['gamma']))[:-1]
+            episode['adv',:] = discount_rewards_tensor(deltas,hp['gamma']*hp['lambda'])
+            episode['ret',:] = discount_rewards_tensor(rew, hp['gamma'])[:-1]
         else:
             rew = np.append(episode.rew, np.array(last_val, dtype=episode.rew.dtype))
             vals = np.append(episode.val, np.array(last_val, dtype=episode.val.dtype))
@@ -512,14 +517,19 @@ class PPOAEAgent(Agent):
         clip_adv = torch.clamp(ratio, 1-clamp_ratio, 1+clamp_ratio) * data['adv']
         loss_pi = -((torch.min(ratio * data['adv'], clip_adv))*mask).sum()/N
 
-        loss_val = (((v_theta.squeeze() - data['ret'])**2)*mask).mean()/N
+        loss_val = (((v_theta.squeeze() - data['ret'])**2)*mask).sum()/N
 
         approx_kl = (((data['logp'] - logp)*mask).sum()/N)
 
         loss_ent = - pi.entropy().sum()/N
         loss_val = loss_val
 
-        loss_rec = ((data['obs']['pov'][:, 1:,...]/255. - rec[:,:-1,...])**2).mean()*100
+        mask2 = mask[:,:-1]
+        loss_rec = (data['obs']['pov'][:, 1:,...]/255. - rec[:,:-1,...]).view(mask2.shape[0],mask2.shape[1],-1)
+        if (self.learning_config['reconstruction_loss_loss'] is not None) and (self.learning_config['reconstruction_loss_loss'] == 'l1'):
+            loss_rec = (((loss_rec.abs()).mean(-1)*mask2).sum())/mask2.sum()
+        else:
+            loss_rec = (((loss_rec**2.0).mean(-1)*mask2).sum())/mask2.sum()
 
         ent = pi.entropy().sum().item()/N
         clipped = ratio.gt(1+clamp_ratio) | ratio.lt(1-clamp_ratio)
@@ -641,7 +651,7 @@ class PPOAEAgent(Agent):
                     ( policy_loss +
                       critic_loss * self.learning_config['value_loss_coef'] + 
                       entropy_loss * self.learning_config['entropy_bonus_coef'] +
-                      reconstruction_loss
+                      reconstruction_loss * self.learning_config['reconstruction_loss_coef']
                     ).backward()
 
                     self.optimizer.step()
@@ -658,9 +668,12 @@ class PPOAEAgent(Agent):
 
                 # Number of minibatch iterations/gradient updates that actually took place.
                 n_minibatches += 1
-            an_image = (loss_metrics['sample_prediction'].detach().cpu().numpy()*255).astype(np.uint8)
-            print("About an image: ", an_image.mean(), an_image.min(), an_image.max())
-            Image.fromarray(an_image).save('test.png')
+
+            if hp['save_test_image'] is not None:
+                an_image = (loss_metrics['sample_prediction'].detach().cpu().numpy()*255).clip(0,255).astype(np.uint8)
+                print("About an image: ", an_image.mean(), an_image.min(), an_image.max())
+                Image.fromarray(an_image).save(hp['save_test_image'])
+
             # After the minibatch updates are finished, do a final check to make sure the policy hasn't diverged too much.
             # If it has, then reset the actor, critic, and optimizer parameters to the backup values saved above.
             used_backup = False
@@ -680,20 +693,24 @@ class PPOAEAgent(Agent):
             policy_losses = policy_losses[:n_minibatches]
             critic_losses = critic_losses[:n_minibatches]
             entropy_losses = entropy_losses[:n_minibatches]
+            reconstruction_losses = reconstruction_losses[:n_minibatches]
             pi_infos = pi_infos[:n_minibatches]
 
+
+            mean = lambda vals: np.nan if len(vals) == 0 else np.nanmean(vals) if not isinstance(vals[0], torch.Tensor) else torch.tensor(vals).mean().cpu().item()
+
             steps = np.array([len(e) for e in self.replay_memory.episodes])
-            mean_val = np.array([e.val.mean() for e in self.replay_memory.episodes]).mean()
-            mean_clip_frac = np.nanmean(np.array([pd['cf'] for pd in pi_infos]))
+            mean_val = mean([e.val.mean() for e in self.replay_memory.episodes])
+            mean_clip_frac = mean([pd['cf'] for pd in pi_infos])
 
             log_data = {
                 **log_data,
                 'n_minibatch_steps': n_minibatches,
-                'mean_buffer_logp': np.mean([x.logp.mean() for x in self.replay_memory.episodes]),
-                'mean_critic_loss': np.mean(critic_losses),
-                'mean_policy_loss': np.mean(policy_losses),
-                'mean_entropy_loss': np.mean(entropy_losses),
-                'mean_reconstruction_loss': np.mean(reconstruction_losses),
+                'mean_buffer_logp': mean([x.logp.mean() for x in self.replay_memory.episodes]),
+                'mean_critic_loss': mean(critic_losses),
+                'mean_policy_loss': mean(policy_losses),
+                'mean_reconstruction_loss': mean(reconstruction_losses),
+                'mean_entropy_loss': mean(entropy_losses),
                 'mean_val': mean_val,
                 'mean_pi_clip_frac': mean_clip_frac,
                 'n_hidden_updates': n_hidden_updates,
@@ -706,10 +723,10 @@ class PPOAEAgent(Agent):
             print(f"Update {1+self.counts['updates']}: {n_minibatches} iters, {n_hidden_updates} hidden updates.")
             print(f" > {len(self.replay_memory.episodes)} episodes since last update.")
             print(f" > Total steps: {steps.sum()} - avg {steps.mean():.2f} for {len(steps)} eps.")
-            print(f" > Mean reward: {np.array([x.rew.sum() for x in self.replay_memory.episodes]).mean():.2f}")
-            print(f" > Mean logp: {np.mean([x.logp.mean() for x in self.replay_memory.episodes]):.2f}")
-            print(f" > Mean critic loss: {np.mean(critic_losses):.2f}")
-            print(f" > Mean reconstruction loss: {np.mean(reconstruction_losses):.2f}")
+            print(f" > Mean reward: {mean([x.rew.sum() for x in self.replay_memory.episodes]):.2f}")
+            print(f" > Mean logp: {mean([x.logp.mean() for x in self.replay_memory.episodes]):.2f}")
+            print(f" > Mean reconstruction loss: {np.mean(reconstruction_losses):.4f}")
+            print(f" > Mean critic loss: {mean(critic_losses):.2f}")
             print(f" > Mean val {mean_val:.4f}")
             print(f" > Mean pi clip frac: {mean_clip_frac:.2f}")
             print(f" > KL est: {terminal_kl:.3f} -->  {kl_after:.3f}")

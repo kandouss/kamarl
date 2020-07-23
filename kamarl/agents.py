@@ -238,10 +238,6 @@ class IndependentAgents(RLAgentBase):
         for agent in self.agents:
             agent.end_episode(*args, **kwargs)
 
-    # @property
-    # def active(self):
-    #     return np.array([agent.active for agent in self.agents], dtype=np.bool)
-
     def __len__(self):
         return len(self.agents)
 

@@ -121,7 +121,7 @@ class ConvNet(nn.Module):
             return X
 
 class DeconvNet(nn.Module):
-    def __init__(self, *modules, n_latent=128, image_size=(64,64,3)):
+    def __init__(self, *modules, n_latent=256, image_size=(64,64,3)):
         super().__init__()
         self.image_size = image_size
 

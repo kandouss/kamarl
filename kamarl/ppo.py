@@ -465,8 +465,8 @@ class PPOAgent(Agent):
             rew = torch.cat((episode.rew, episode.rew.new_tensor([last_val])))
             vals = torch.cat((episode.val, episode.val.new_tensor([last_val])))
             deltas = rew[:-1] + hp['gamma'] * (vals[1:] - vals[:-1])
-            episode['adv',:] = discount_rewards_tensor(deltas, deltas.new_tensor(hp['gamma']*hp['lambda']))
-            episode['ret',:] = discount_rewards_tensor(rew, rew.new_tensor(hp['gamma']))[:-1]
+            episode['adv',:] = discount_rewards_tensor(deltas,hp['gamma']*hp['lambda'])
+            episode['ret',:] = discount_rewards_tensor(rew, hp['gamma'])[:-1]
         else:
             rew = np.append(episode.rew, np.array(last_val, dtype=episode.rew.dtype))
             vals = np.append(episode.val, np.array(last_val, dtype=episode.val.dtype))

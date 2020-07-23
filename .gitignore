@@ -1,3 +1,5 @@
+*.png
+*.mp4
 .vscode/
 wandb/
 

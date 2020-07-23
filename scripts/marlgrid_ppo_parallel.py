@@ -6,9 +6,9 @@ import datetime, time
 import os
 
 from kamarl.ppo_rec import PPOAEAgent
-from kamarl.utils import find_cuda_device, count_parameters, MultiParallelWrapper, DumberVecEnv    
+from kamarl.utils import find_cuda_device, count_parameters, MultiParallelWrapper, DumberVecEnv, stack_environments
 from kamarl.agents import IndependentAgents
-from kamarl.logging import WandbLogger
+from kamarl.log import WandbLogger
 
 from marlgrid.envs import env_from_config
 # from marlgrid import envs as marl_envs
@@ -19,45 +19,43 @@ from baselines.common.vec_env.subproc_vec_env import SubprocVecEnv
 
 
 run_time = datetime.datetime.now().strftime("%m_%d_%H:%M:%S")
-try:
-    device = find_cuda_device('1080 Ti')[0]
-except:
-    device = torch.device('cpu')
 
-save_root = os.path.abspath(os.path.expanduser(f'/tmp/marlgrid_ppo_parallel/{run_time}'))
+device = find_cuda_device('1080 Ti')[1]
+
+save_root = os.path.abspath(os.path.expanduser(f'/fast/marlgrid_ppo_parallel/{run_time}'))
 
 experiment_config = {
-    'n_parallel_envs': 8, # set this to None in order to disable subprocess environment vectorization.
+    'n_parallel_envs': 64, # set this to None in order to disable subprocess environment vectorization.
     'total_episodes': int(1e6),
     'checkpoint_interval': 8192/2, # episodes.
-    'recording_interval': 100,
+    'recording_interval': 1000,
     'save_root': save_root
 }
 
-# Config for a cluttered multigrid
-env_config = {
-    'env_class': 'ClutteredMultiGrid',
+# # Config for a cluttered multigrid
+# env_config = {
+#     'env_class': 'ClutteredMultiGrid',
 
-    'grid_size': 14,
-    'max_steps': 150,
-    'clutter_density': 0.2,
-    'respawn': True,
-    'ghost_mode': True,
-    'reward_decay': False, # default true.
-}
+#     'grid_size': 14,
+#     'max_steps': 150,
+#     'clutter_density': 0.2,
+#     'respawn': True,
+#     'ghost_mode': True,
+#     'reward_decay': False, # default true.
+# }
 
 # Config for a cluttered goal cycle environment
 env_config = {
     'env_class': 'ClutteredGoalCycleEnv',
-    'grid_size': 15,
-    'max_steps': 200,
-    'clutter_density': 0.1,
+    'grid_size': 13,
+    'max_steps': 250,
+    'clutter_density': 0.15,
     'respawn': True,
     'ghost_mode': True,
     'reward_decay': False, # default true.
-    'n_bonus_tiles': 2,
+    'n_bonus_tiles': 3,
     'initial_reward': True,
-    'penalty': -0.5,
+    'penalty': -0.25,
 }
 
 agent_interface_config = {
@@ -65,40 +63,47 @@ agent_interface_config = {
     'view_size': 7,
     'view_offset': 1,
     'observation_style': 'rich',
-    'prestige_beta': 0.95, # determines the rate at which prestige decays
+    'prestige_beta': 0.99, # determines the rate at which prestige decays
+    'prestige_scale': 4.0,
     'color': 'prestige',
 }
 
 ppo_learning_config = {
-    "batch_size": 16,
-    'num_minibatches': 30,
-    "minibatch_size": 256,
-    "minibatch_seq_len": 8,
-    "hidden_update_interval": 5,
+    "batch_size": 64,
+    'num_minibatches': 20,
+    "minibatch_size": 512,
+    "minibatch_seq_len": 16,
+    "hidden_update_interval": 2,
+    "hidden_update_n_parallel": 64,
 
-    'learning_rate': 1.e-3, # 1.e-3, #
+    'learning_rate': 1.e-4, # 1.e-3, #
     "kl_target":  0.01,
     "clamp_ratio": 0.2,
     "lambda":0.97,
-    "gamma": 0.99,
-    'entropy_bonus_coef': 0.0,#0001,
-    'value_loss_coef': 1.0,
+    "gamma": 0.993,
+    'entropy_bonus_coef': 0.003,#0001,
+    'value_loss_coef': 0.05,
+    'reconstruction_loss_coef': 0.5,
+    'reconstruction_loss_loss': 'l1',
+
+    'save_test_image': os.path.join(save_root,'sample_reconstruction.png')
 }
 
 ppo_model_config = {
     "conv_layers" : [
-        {'out_channels': 8, 'kernel_size': 3, 'stride': 3, 'padding': 0},
-        {'out_channels': 16, 'kernel_size': 3, 'stride': 1, 'padding': 0},
-        {'out_channels': 16, 'kernel_size': 3, 'stride': 1, 'padding': 0},
+        {'out_channels': 32, 'kernel_size': 3, 'stride': 3, 'padding': 0},
+        {'out_channels': 32, 'kernel_size': 3, 'stride': 2, 'padding': 1},
+        {'out_channels': 32, 'kernel_size': 3, 'stride': 1, 'padding': 0},
+        # {'out_channels': 32, 'kernel_size': 3, 'stride': 1, 'padding': 0},
     ],
-    'input_trunk_layers': [192,192],
-    'lstm_hidden_size': 256,
-    'val_mlp_layers': [64,64],
-    'pi_mlp_layers': [64,64],
+    'input_trunk_layers': [128],
+    'lstm_hidden_size': 192,
+    'val_mlp_layers': [64,32],
+    'pi_mlp_layers': [64,32],
 }
 
 load_agents = [] # List of save paths of already-made agents to load into the env
-n_new_agents = 1 # Number of new agents to be created with the above config/hyperparameters.
+n_new_agents = 3 # Number of new agents to be created with the above config/hyperparameters.
 
 
 grid_agents = []
@@ -155,9 +160,11 @@ def make_environment(agents, experiment_config, env_config, seed_bump=0):
         env = env_from_config(env_config)
     else:
         env_hooks = [(lambda: env_from_config({**env_config, 'seed': k})) for k in range(n_par)]
-        env = MultiParallelWrapper(DumberVecEnv(env_hooks), n_agents=len(agents), n_envs=n_par)
+        env = stack_environments(env_hooks, n_subprocs=16)
+        # env = MultiParallelWrapper(DumberVecEnv(env_hooks), n_agents=len(agents), n_envs=n_par)
         # env = MultiParallelWrapper(SubprocVecEnv(env_hooks), n_agents=len(agents), n_envs=n_par)
-
+        
+    # return env
     if experiment_config['recording_interval'] is not None:
         return GridRecorder(env, save_root=experiment_config['save_root'], max_steps=env_config['max_steps']+1)
     else:
@@ -179,6 +186,9 @@ wbl.log_hyperparams({
     'agent_interface_config': agent_interface_config,
     'ppo_learning_config': ppo_learning_config,
     'ppo_model_config': ppo_model_config})
+
+print()
+print(f"Saving in {save_root}")
 
 last_recorded = -experiment_config['recording_interval']-1
 
@@ -218,7 +228,8 @@ while ep_num < experiment_config['total_episodes']:
             agents.save_step(obs_array, action_array, reward_array, done_array)
 
             obs_array = next_obs_array
-            done = np.array(done_array).all()
+            done = np.array(done_array).any()
+            # print(done)
 
             ep_steps += 1
             total_steps += 1
@@ -227,9 +238,9 @@ while ep_num < experiment_config['total_episodes']:
         ep_time = time.time() - ep_start_time
         if ep_num % 500 == 0:
             agents[0].save(os.path.join(save_root, "checkpoints", f"episode_{ep_num}/"))
-
+        n_agents = len(agents.agents)
         print(
-            f"Episode {ep_num: >5d}: len={ep_steps: <4d} | cum rew={total_reward: <4.1f} ({ep_reward: >+3.1f}) | fps={ep_steps*n_parallel/ep_time: >5.2f}"
+            f"Episode {ep_num: >5d}: len={ep_steps: <4d} | cum rew={total_reward: <4.1f} ({ep_reward/n_parallel/n_agents: >+3.1f}) | fps={ep_steps*n_parallel/ep_time: >5.2f}"
         )
 
     agents.end_episode()
