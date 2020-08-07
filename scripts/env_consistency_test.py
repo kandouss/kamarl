@@ -1,13 +1,14 @@
 import torch
 import numpy as np
 import torch.nn as nn
+import gym
 
 import datetime, time
 import os
 
 from kamarl.ppo_rec import PPOAEAgent
 from kamarl.utils import find_cuda_device, count_parameters
-from kamarl.vec_env import  stack_environments
+from kamarl.vec_env import stack_environments
 from kamarl.agents import IndependentAgents
 from kamarl.log import WandbLogger
 
@@ -25,50 +26,80 @@ device = find_cuda_device('1080 Ti')[1]
 
 save_root = os.path.abspath(os.path.expanduser(f'/fast/marlgrid_ppo_parallel/{run_time}'))
 
+
+class ConsistencyTestEnv(gym.Env):
+    observation_space_ = gym.spaces.Dict(
+            {'pov': gym.spaces.Box(low=0.0, high=1.0, shape=(15,15,3), dtype=np.float32)}
+        )
+    action_space_ = gym.spaces.Discrete(10)
+    def __init__(self, n_agents, **config):
+
+
+        self.n_agents = n_agents
+        self.config = config
+        self.n_episodes = 0
+        self.n_steps = 0
+        self.action_space = gym.spaces.Tuple([self.action_space_ for _ in range(self.n_agents)])
+        self.observation_space = gym.spaces.Tuple([self.observation_space_ for _ in range(self.n_agents)])
+        # super().__init__()
+
+    def reset(self):
+        self.n_episodes += 1
+        self.n_steps = 0
+        return self.get_obs()
+
+    @property
+    def seed(self):
+        return self.config.get('seed', 0)
+
+    @property
+    def max_steps(self):
+        return self.config.get('max_steps', 100)
+
+    def get_obs(self, vals=None):
+        # povs = [np.full(shape=self.observation_space['pov'].shape, fill_value=self.n_steps/self.max_steps + k/10.)
+        #     for k in range(self.n_agents)]
+        # return {'pov': np.stack(povs)}
+        if vals is None:
+            return [
+                {'pov': np.full(shape=self.observation_space[k]['pov'].shape, fill_value=self.n_steps/self.max_steps + k/10., dtype=np.float32)}
+                for k in range(self.n_agents)
+            ]
+        else:
+            return [
+                {'pov': np.full(shape=self.observation_space[k]['pov'].shape, fill_value=vals[k], dtype=np.float32)}
+                for k in range(self.n_agents)
+            ]
+
+    def get_rew(self):
+        return [self.seed for k in range(self.n_agents)]
+
+    def step(self, actions):
+        self.n_steps += 1
+        done = self.n_steps > self.max_steps
+        return (
+            self.get_obs(actions),
+            self.get_rew(),
+            done,
+            {}
+        )
+    
+    def render(self, *args, **kwargs):
+        print("Env render!")
+
+
 experiment_config = {
-    'n_parallel_envs': 40, # set this to None in order to disable subprocess environment vectorization.
+    'n_parallel_envs': 56, # set this to None in order to disable subprocess environment vectorization.
     'n_subprocs': 8,
     'total_episodes': int(1e6),
     'checkpoint_interval': 8192/2, # episodes.
     'recording_interval': 1000,
     'save_root': save_root
 }
-
-# # Config for a cluttered multigrid
-# env_config = {
-#     'env_class': 'ClutteredMultiGrid',
-
-#     'grid_size': 14,
-#     'max_steps': 150,
-#     'clutter_density': 0.2,
-#     'respawn': True,
-#     'ghost_mode': True,
-#     'reward_decay': False, # default true.
-# }
-
-# Config for a cluttered goal cycle environment
 env_config = {
-    'env_class': 'ClutteredGoalCycleEnv',
-    'grid_size': 13,
-    'max_steps': 250,
-    'clutter_density': 0.15,
-    'respawn': True,
-    'ghost_mode': True,
-    'reward_decay': False, # default true.
-    'n_bonus_tiles': 3,
-    'initial_reward': True,
-    'penalty': -0.25,
+    'max_steps': 100
 }
 
-agent_interface_config = {
-    'view_tile_size': 3,
-    'view_size': 7,
-    'view_offset': 1,
-    'observation_style': 'rich',
-    'prestige_beta': 0.99, # determines the rate at which prestige decays
-    'prestige_scale': 4.0,
-    'color': 'prestige',
-}
 
 ppo_learning_config = {
     "batch_size": 64,
@@ -91,6 +122,7 @@ ppo_learning_config = {
     'save_test_image': os.path.join(save_root,'sample_reconstruction.png')
 }
 
+
 ppo_model_config = {
     "conv_layers" : [
         {'out_channels': 32, 'kernel_size': 3, 'stride': 3, 'padding': 0},
@@ -104,31 +136,23 @@ ppo_model_config = {
     'pi_mlp_layers': [64,32],
 }
 
-load_agents = [] # List of save paths of already-made agents to load into the env
 n_new_agents = 3 # Number of new agents to be created with the above config/hyperparameters.
-
 
 grid_agents = []
 new_agents_info = [
-    {'interface_config': agent_interface_config, 'learning_config': ppo_learning_config, 'model_config': ppo_model_config}
+    {'learning_config': ppo_learning_config, 'model_config': ppo_model_config}
     for _ in range(n_new_agents)
 ]
 
 grid_agents = []
 
-for agent_load_path in load_agents:
-    grid_agents.append(PPOAEAgent.load(agent_load_path))
-
-
 for agent_info in new_agents_info:
-    iface = GridAgentInterface(**agent_info['interface_config'])
     new_fella = PPOAEAgent(
-        observation_space=iface.observation_space,
-        action_space=iface.action_space, 
+        observation_space=ConsistencyTestEnv.observation_space_,
+        action_space=ConsistencyTestEnv.action_space_, 
         learning_config=agent_info['learning_config'],
         model_config=agent_info['model_config'],
     )
-    new_fella.metadata['marlgrid_interface'] = agent_interface_config
     grid_agents.append(new_fella)
 
 
@@ -154,21 +178,16 @@ print(f"Agents have {count_parameters(agents.agents[0].ac)} parameters.")
 # agents.agents[0] = loaded_agent
 
 
-def make_environment(agents, experiment_config, env_config):
-    env_config['agents'] = [agent.metadata['marlgrid_interface'] for agent in agents]
+def make_environment(agents, experiment_config, env_config, seed_bump=0):
+    # env_config['agents'] = [agent.metadata['marlgrid_interface'] for agent in agents]
 
     n_par = experiment_config['n_parallel_envs']
-    if n_par is None:
-        env = env_from_config(env_config)
-    else:
-        def make_hook(k):
-            new_config = {**env_config, 'seed': k}
-            return lambda: env_from_config(new_config, randomize_seed=False)
-        env_hooks = [make_hook(k) for k in range(n_par)]
-        env = stack_environments(env_hooks, n_subprocs=experiment_config['n_subprocs'])
-        # import pdb; pdb.set_trace()
-        # env = MultiParallelWrapper(DumberVecEnv(env_hooks), n_agents=len(agents), n_envs=n_par)
-        # env = MultiParallelWrapper(SubprocVecEnv(env_hooks), n_agents=len(agents), n_envs=n_par)
+
+    def make_hook(k):
+        new_config = {**env_config, 'seed': k}
+        return lambda: ConsistencyTestEnv(n_agents = len(grid_agents), seed=k)
+    env_hooks = [make_hook(k) for k in range(n_par)]
+    env = stack_environments(env_hooks, n_subprocs=experiment_config['n_subprocs'])
         
     return env
     # if experiment_config['recording_interval'] is not None:
@@ -184,14 +203,6 @@ env = make_environment(
 
 
 wbl = None
-# wbl = WandbLogger(name='ppo', project='marlgrid_stale_refreshing_test')
-# agents.set_logger(wbl)
-# wbl.log_hyperparams({
-#     'env_name': env_config['env_class'],
-#     'env_params': env_config,
-#     'agent_interface_config': agent_interface_config,
-#     'ppo_learning_config': ppo_learning_config,
-#     'ppo_model_config': ppo_model_config})
 
 print()
 print(f"Saving in {save_root}")
@@ -204,6 +215,7 @@ n_parallel = experiment_config['n_parallel_envs'] or 1
 total_reward = 0
 total_steps = 0
 ep_num = 0
+
 while ep_num < experiment_config['total_episodes']:
     # Initialize the environment and state
     obs_array = env.reset()
@@ -224,20 +236,24 @@ while ep_num < experiment_config['total_episodes']:
         while not done:
             # Get an action for each agent.
             # action_array = [agent.action_space.sample() for agent in agents]
-            action_array0 = agents.action_step(obs_array)
+            # action_array = agents.action_step(obs_array)
+            
+            action_array = np.array([k for k in range(len(obs_array))])
             action_array = [
                 k*100 + np.arange(n_parallel)
                 for k in range(len(agents.agents))
             ]
+            action_array = np.array([env.action_space.sample() for _ in range(n_parallel)]).T
             # import pdb; pdb.set_trace()
             action_record.append(action_array)
             obs_record.append(obs_array)
 
-            next_obs_array, reward_array, done_array, _ = env.step(np.array(action_array)%7)
+            next_obs_array, reward_array, done_array, _ = env.step(action_array)
 
-
+            # import pdb; pdb.set_trace()
             total_reward += reward_array.sum()
             ep_reward += reward_array.sum()
+
             agents.save_step(obs_array, action_array, reward_array, done_array)
 
             obs_array = next_obs_array
@@ -257,16 +273,18 @@ while ep_num < experiment_config['total_episodes']:
         )
 
     agents.end_episode()
-    testf = lambda n, k: agents.agents[n].replay_memory.episodes[k].act
-    # rpm = agents.agents[0].replay_memory.episodes[0]
-    # rpm2 = agents.agents[1].replay_memory.episodes[0]
     ar_ref = np.array(action_record).transpose(1,2,0)
     ar_rec = np.array([[agent.replay_memory.episodes[k].act for k in range(len(agent.replay_memory.episodes))] for agent in agents.agents])
     rew_rec = np.array([[agent.replay_memory.episodes[k].rew for k in range(len(agent.replay_memory.episodes))] for agent in agents.agents])
-    o1 = np.array([obs_step[1]['pov'] for obs_step in obs_record])
-    o2 = np.array([ep['obs']['pov'] for ep in agents[1].replay_memory.episodes])
-    import pdb; pdb.set_trace()
+    o1 = np.array([obs_step[1]['pov'][...,0,0,0] for obs_step in obs_record])
+    o2 = np.array([ep['obs']['pov'][...,0,0,0] for ep in agents[1].replay_memory.episodes])
+    check_ = lambda agent_no, ep_no: agents[agent_no].replay_memory.episodes[ep_no]['obs']['pov'][1:,...,0,0,0] == agents[agent_no].replay_memory.episodes[ep_no]['act'][:-1]
 
+    # testf = lambda n, k: agents.agents[n].replay_memory.episodes[k].act
+    # rpm = agents.agents[0].replay_memory.episodes[0]
+    # rpm2 = agents.agents[1].replay_memory.episodes[0]
+    # tmp = np.array([testf(0,k)[:3] for k in range(10)])
+    import pdb; pdb.set_trace()
 
     if isinstance(env, GridRecorder) and env.recording:
         env.export_both(save_root=os.path.join(save_root, 'recordings'), episode_id=f'episode_{ep_num}')

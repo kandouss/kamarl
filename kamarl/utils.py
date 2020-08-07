@@ -6,10 +6,6 @@ import itertools
 import numba
 import copy
 
-from baselines.common.vec_env import VecEnv
-from baselines.common.vec_env.subproc_vec_env import SubprocVecEnv
-
-
 @numba.njit(numba.float32[:](numba.float32[:], numba.float32))
 def discount_rewards(rewards, gamma):
     discounted_rewards = np.zeros_like(rewards)
@@ -97,6 +93,10 @@ def get_module_inputs(observation_space):
         raise ValueError(f"Can't figure out image/flat input sizes for space {observation_space}.")
     return image_shape, n_flat_inputs
 
+
+def combine_spaces(spaces):
+    return gym.spaces.Tuple(spaces)
+
 class Collater:
     def __init__(self, space):
         self.space = space
@@ -135,141 +135,26 @@ class Collater:
                     tgt = tgt[k]
             except:
                 import pdb; pdb.set_trace()
-            tgt[ks[-1]] = np.stack([x[ks[-1]] for x in srcs])
+            try:
+                tgt[ks[-1]] = np.stack([x[ks[-1]] for x in srcs])
+            except:
+                import pdb; pdb.set_trace()
         return out
 
-    def decollate(self, item, chunksize):
-        tmp, (addr, _) = item, self.spacelist[0]
-        for k in addr:
-            tmp = tmp[k]
-        n_total = len(tmp)
-        n_chunks = n_total // chunksize
-
-        retlist = [self.new_empty() for _ in range(n_chunks)]
+    def decollate(self, items, n_chunks):
+        collated_output = [self.new_empty() for _ in range(n_chunks)]
         for addr, _ in self.spacelist:
-            rl_tmp = retlist
-            src = item
+            out_ptrs = collated_output
+            src_ptr = items
+
             for k in addr[:-1]:
-                rl_tmp = [x[k] for x in rl_tmp]
-                src = src[k]
-            for chunk_no, tgt in enumerate(rl_tmp):
-                tgt[addr[-1]] = src[addr[-1]][chunk_no*chunksize:(chunk_no+1)*chunksize]
+                out_ptrs = [out_ptr[k] for out_ptr in out_ptrs]
+                src_ptr = src_ptr[k]
 
-        return retlist
-
+            src_vals = src_ptr[addr[-1]]
+            chunksize = len(src_vals)//n_chunks
             
-
-
-# test_space = gym.spaces.Dict({'hi': gym.spaces.Discrete(5)})
-# test_space = gym.spaces.Dict({
-#     'hi': gym.spaces.Discrete(5),
-#     'mom': gym.spaces.Tuple([gym.spaces.Box(0,1,shape=()), gym.spaces.Box(0,1,(2,))]),
-# })
-# colin = Collater(test_space)
-# items = [
-#     {'hi': 2, 'mom': [0, [1,2]]},
-#     {'hi': 3, 'mom': [2, [3,9]]},
-#     {'hi': 4, 'mom': [4, [7,8]]}
-# ]
-# print(colin.collate(items))
-    
-class DumberVecEnv:
-    def __init__(self, env_fns):
-        self.envs = [fn() for fn in env_fns]
-        env = self.envs[0]
-        VecEnv.__init__(self, len(env_fns), env.observation_space, env.action_space)
-        obs_spaces = self.observation_space.spaces if isinstance(self.observation_space, gym.spaces.Tuple) else (self.observation_space,)
-        self.buf_obs = []
-        self.buf_dones = []
-        self.buf_rews  = []
-        self.buf_infos = []
-        self.actions = []
-
-    def step(self, actions):
-        return list(zip(*[env.step(action) for env, action in zip(self.envs, actions)]))
-
-    def render(self, *args, which=0, **kwargs):
-        if which is None:
-            return [e.render(*args, **kwargs) for e in self.envs]
-        else:
-            return self.envs[which].render(*args, **kwargs)
-
-    def reset(self):
-        # self._reset_count = getattr(self, '_reset_count', 0) + 1
-        # print(f" rst {self._reset_count}")
-        # if self._reset_count > 10:
-        #     print("\n"*10)
-        #     for line in traceback.format_stack():
-        #         print(inspect.stack())
-        #     print("\n"*10)
-        #     exit()
+            for chunk_no, out_ptr in enumerate(out_ptrs):
+                out_ptr[addr[-1]] = src_vals[chunk_no*chunksize:(chunk_no+1)*chunksize]
         
-        return [e.reset() for e in self.envs]
-
-    def close(self):
-        return
-
-def combine_spaces(spaces):
-    return gym.spaces.Tuple(tuple(spaces))
-
-class MultiParallelWrapper(gym.Wrapper):
-    def __init__(self, env, env_chunk_size = None):
-        if not hasattr(env, 'reward_range'):
-            env.reward_range = None
-        if not hasattr(env, 'metadata'):
-            env.metadata = {}
-        super().__init__(env)
-        self.action_collater = Collater(env.action_space)
-        self.obs_collater = Collater(env.observation_space)
-        self.env_chunk_size = env_chunk_size
-
-    def fix_obs(self, obs):
-        # import pdb; pdb.set_trace()
-        if self.env_chunk_size is not None:
-            obs = [x for o in obs for x in o]
-        return self.obs_collater.collate(obs)
-        # return [self.obs_collater.collate(o) for o in obs]
-        
-    def render(self, which=0, **kwargs):
-        if hasattr(self.env, 'remotes'): # if env is a subprocvecenv, without importing that class
-            self.env.remotes[which].send(('render', {'which':which,**kwargs}))
-            return self.env.remotes[which].recv()
-        elif hasattr(self.env, 'envs'):
-            return self.env.envs[which].render(**kwargs)
-        else:
-            return self.env.render(**kwargs)
-
-    def fix_action(self, action):
-        ret = self.action_collater.decollate(action, chunksize=1)
-        N = len(ret)
-        chunksize = self.env_chunk_size
-        return [ret[chunksize*k:chunksize*(k+1)] for k in range(N//chunksize)]
-
-    def fix_scalar(self, item):
-        if self.env_chunk_size is not None:
-            ret = np.array([x for o in item for x in o])
-        else:
-            ret = np.array(item)
-        return ret.T
-
-    def step(self, action):
-        o, r, d, i = self.env.step(self.fix_action(action))
-        # import pdb; pdb.set_trace()
-        return self.fix_obs(o), self.fix_scalar(r), self.fix_scalar(d), i
-    
-    def reset(self, **kwargs):
-        return self.fix_obs(self.env.reset(**kwargs))
-
-def stack_environments(env_fns, n_subprocs):
-    if len(env_fns) % n_subprocs != 0:
-        raise ValueError("number of environments should be divisible by number of subprocesses.")
-    # env_fns = [env_fns[k::n_subprocs] for k in range(n_subprocs)]
-    # tmp = [env_fns[n_subprocs*k:n_subprocs*(k+1):] for k in range(len(env_fns)//n_subprocs)]
-    # import pdb; pdb.set_trace()
-    chunksize = len(env_fns)//n_subprocs
-    env_fns_ = [(lambda: DumberVecEnv(env_fns[chunksize*k:chunksize*(k+1):])) for k in range(n_subprocs)]
-    # import pdb; pdb.set_trace()
-    # ret = SubprocVecEnv(env_fns)
-    # import pdb; pdb.set_trace()
-    return MultiParallelWrapper(SubprocVecEnv(env_fns_), env_chunk_size=chunksize)
-    
+        return collated_output

@@ -8,7 +8,7 @@ import os
 from kamarl.ppo_rec import PPOAEAgent
 from kamarl.utils import find_cuda_device, count_parameters
 from kamarl.agents import IndependentAgents
-from kamarl.logging import WandbLogger
+from kamarl.log import WandbLogger
 
 from marlgrid.envs import env_from_config
 # from marlgrid import envs as marl_envs
@@ -17,8 +17,8 @@ from marlgrid.utils.video import GridRecorder
 
 
 run_time = datetime.datetime.now().strftime("%m_%d_%H:%M:%S")
-# device = find_cuda_device('1080 Ti')[1]
-device = torch.device('cpu')
+device = find_cuda_device('1080 Ti')[0]
+# device = torch.device('cpu')
 
 save_root = os.path.abspath(os.path.expanduser(f'/tmp/marlgrid_ppo_refactor/{run_time}'))
 
@@ -57,7 +57,7 @@ agent_interface_config = {
     'observation_style': 'rich',
     'prestige_beta': 0.95, # determines the rate at which prestige decays
     'color': 'prestige',
-    'spawn_delay': 100,
+    'spawn_delay': 0,
 }
 
 ppo_learning_config = {
@@ -89,7 +89,7 @@ ppo_model_config = {
 }
 
 load_agents = [] # List of save paths of already-made agents to load into the env
-n_new_agents = 1 # Number of new agents to be created with the above config/hyperparameters.
+n_new_agents = 2 # Number of new agents to be created with the above config/hyperparameters.
 
 
 grid_agents = []
@@ -177,7 +177,16 @@ for ep_num in range(num_episodes):
                 obs_array = next_obs_array
                 done = np.array(done_array).all()
 
-                
+                csim = lambda a, b: np.dot(a, b)/(np.linalg.norm(a)*np.linalg.norm(b))
+                def gettile(thing):
+                    ret = np.zeros((3,3,3), dtype=np.uint8)
+                    thing.render(img=ret)
+                    return ret
+                things = [k for k,v in env.grid.obj_reg.obj_to_key_map.items() if k is not None]
+
+                tmp1 = gettile(env.agents[0])
+                tmp2 = gettile(things[0])
+                # import pdb; pdb.set_trace()
                 # print(ep_steps, tuple(action_array))
                 # time.sleep(0.1)
                 # env.render(show_agent_views=True)

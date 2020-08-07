@@ -19,13 +19,17 @@ def compare_modules(a, b):
 def device_of(mod):
     return next(mod.parameters()).device
 
-def make_mlp(layer_sizes, nonlinearity=nn.Tanh, output_nonlinearity=None):
+def make_mlp(layer_sizes, nonlinearity=nn.Tanh, output_nonlinearity=None, gain=None):
+    if gain is None:
+        gain = nn.init.calculate_gain({nn.Tanh:'tanh', nn.ReLU:'relu'}.get(nonlinearity, 'relu'))
     layers = []
     last_size = layer_sizes[0]
     for k,size in enumerate(layer_sizes[1:]):
         if k>0:
             layers.append(nonlinearity())
         layers.append(nn.Linear(last_size, size))
+        nn.init.orthogonal_(layers[-1].weight, gain)
+        nn.init.zeros_(layers[-1].bias)
         last_size = size
     if len(layers) > 0:
         if output_nonlinearity is not None:
@@ -88,6 +92,14 @@ class ConvNet(nn.Module):
         else:
             self.output_nonlinearity = None
 
+        self._init_parameters()
+
+    def _init_parameters(self):
+        for k,layer in enumerate(self.mods):
+            if isinstance(layer, nn.Conv2d):
+                nn.init.orthogonal_(layer.weight, nn.init.calculate_gain('relu'))
+                nn.init.zeros_(layer.bias)
+
     def show_shapes(self):
         X = torch.randn(self.input_shape)[None,...]
         print(f"Input: {X.shape}")
@@ -129,9 +141,18 @@ class DeconvNet(nn.Module):
         self.fc = nn.Linear(n_latent, int(np.prod(self.dc_shape)))
         self.ll = nn.ReLU(inplace=True)
         self.mods = nn.Sequential(*modules)
+        # self.nlin = nn.Sigmoid()
         print(f"DECONV FC is {self.fc}")
         print(f"   DC SHAPE  {self.dc_shape}")
+        self._init_parameters()
 
+    def _init_parameters(self):
+        # import pdb; pdb.set_trace()
+        for k,layer in enumerate(self.mods):
+            if isinstance(layer, nn.ConvTranspose2d):
+                nn.init.orthogonal_(layer.weight, nn.init.calculate_gain('relu'))
+                nn.init.zeros_(layer.bias)
+                
     def forward(self, X):
         in_shape = [-1, *self.dc_shape]
         out_shape = [*X.shape[:-1],*self.image_size]
@@ -145,6 +166,7 @@ class DeconvNet(nn.Module):
         if X.shape[-3] == 3:
             X = X.permute(*range(extra_dims), -2,-1,-3)
         return X[..., :self.image_size[0], :self.image_size[1],:].reshape(out_shape)
+        # return ret.clamp(0.0, 1.0)
         
         
     @staticmethod
@@ -192,6 +214,7 @@ def lstm_noseq_forward(X, hx, weight_ih, weight_hh, bias_ih, bias_hh):
     return hx_out[:, :, 1:]
 
 
+
 class SeqLSTM(nn.RNNCellBase):
     """ The built-in PyTorch RNN modules only return the hidden states for the final step in an input 
     sequence. This LSTM module returns all the intermediate hidden states, and does so by looping over the
@@ -201,7 +224,31 @@ class SeqLSTM(nn.RNNCellBase):
 
     def __init__(self, input_size, hidden_size):
         super().__init__(input_size=input_size, hidden_size=hidden_size, bias=True, num_chunks=4)
+        
+        self._init_parameters()
 
+    def _init_parameters(self):
+        return
+        
+        # orthogonal initialization of recurrent weights
+        # w_ii, w_if, w_ic, w_io = cell.weight_ih.chunk(4, 0)
+        for weight in self.weight_ih.chunk(4, 0):
+            nn.init.xavier_uniform_(weight)
+
+        # w_hi, w_hf, w_hc, w_ho = cell.weight_hh.chunk(4, 0)
+        for weight in self.weight_hh.chunk(4,0):
+            nn.init.orthogonal_(weight)
+
+        nn.init.zeros_(self.bias_ih)
+        nn.init.zeros_(self.bias_hh)
+
+        b_ii, b_if, b_ic, b_io = self.bias_ih.chunk(4, 0)
+        b_hi, b_hf, b_hc, b_ho = self.bias_ih.chunk(4, 0)
+
+        nn.init.constant_(b_if, 2.0)
+        nn.init.constant_(b_hf, 2.0)
+        self.reset_parameters()
+        
     def forward(self, X, hx=None, vec_hidden=False):
         out_shape = (*X.shape[:-1], self.hidden_size)
         while X.dim() < 3:

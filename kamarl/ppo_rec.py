@@ -89,7 +89,7 @@ class PPOLSTM(nn.Module):
 
         self.combined_input_layers = make_mlp(
             [self.conv_layers.n + n_flat_inputs, *self.config['input_trunk_layers']],
-            nonlinearity=nn.Tanh,
+            nonlinearity=nn.ReLU,
             output_nonlinearity=nn.Tanh)
         
         tmp = [x.out_features for x in self.combined_input_layers if hasattr(x, 'out_features')]
@@ -101,15 +101,35 @@ class PPOLSTM(nn.Module):
         self.lstm = SeqLSTM(feature_count, self.config['lstm_hidden_size'])
         
 
+        if self.config.get('deconv_layers', None) is not None:
+            deconv_layers_config = self.config['deconv_layers']
+        else:
+            deconv_layers_config = []
+            for conv_layer in self.config['conv_layers'][::-1]:
+                conv_layer_copy = {k:v for k,v in conv_layer.items()}
+                conv_layer_copy['in_channels'] = conv_layer_copy['out_channels']
+                del conv_layer_copy['out_channels']
+                deconv_layers_config.append(conv_layer_copy)
+
+        deconv_layers = []
+        out_channels = 3
+        for k,c in enumerate(deconv_layers_config[::-1]):
+            deconv_layers.append(nn.ConvTranspose2d(out_channels=out_channels, **c))
+            out_channels = c['in_channels']
+            if k < len(deconv_layers_config) - 1:
+                deconv_layers.append(nn.ReLU(inplace=True))
+
         self.deconv_layers = DeconvNet(
-            nn.ConvTranspose2d(32, 32, kernel_size=3, padding=0),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(32, 32, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(32, 3, kernel_size=3, stride=3),
-            n_latent=self.config['lstm_hidden_size']+action_space.n,
+            *deconv_layers[::-1],
+            n_latent = self.config['lstm_hidden_size'] + action_space.n,
             image_size=input_image_shape
         )
+        # from kamarl.utils import count_parameters
+
+        # print(self.deconv_layers)
+        # print(count_parameters(self.deconv_layers))
+        # exit()
+
 
 
         self.mlp_val = make_mlp(
@@ -143,17 +163,28 @@ class PPOLSTM(nn.Module):
                     X = X[..., None]
                 return X
             if len(self.input_keys)>0:
-                return (
-                    X['pov'], 
-                    torch.cat(tuple([
-                        (
-                            F.one_hot(torch.tensor(X[k]), self.observation_space[k].n).float() 
-                                if isinstance(self.observation_space[k], gym.spaces.Discrete)
-                            else expand_dims(torch.tensor(X[k])).float()
-                        )
-                        for k in self.input_keys
-                    ]), dim=-1).to(device_of(self))
-                )
+                try:
+                    return (
+                        X['pov'], 
+                        torch.cat(tuple([
+                            (
+                                F.one_hot(torch.tensor(X[k]), self.observation_space[k].n).float() 
+                                    if isinstance(self.observation_space[k], gym.spaces.Discrete)
+                                else expand_dims(torch.tensor(X[k])).float()
+                            )
+                            for k in self.input_keys
+                        ]), dim=-1).to(device_of(self))
+                    )
+                except:
+                    tmp = [
+                            (
+                                F.one_hot(torch.tensor(X[k]), self.observation_space[k].n).float() 
+                                    if isinstance(self.observation_space[k], gym.spaces.Discrete)
+                                else expand_dims(torch.tensor(X[k])).float()
+                            )
+                            for k in self.input_keys
+                        ]
+                    import pdb; pdb.set_trace()
             else:
                 return (X['pov'],None)
         else:
@@ -182,8 +213,11 @@ class PPOLSTM(nn.Module):
         else:
             return pi, v
 
-    def pi_v_rec(self, X, hx, act, return_hidden=False):
+    def pi_v_rec(self, X, hx, act, return_hidden=False, input_dropout=0.0):
         X = self.input_layers(X)
+        # import pdb; pdb.set_trace()
+        X = nn.functional.dropout(X, p=input_dropout)
+
         hx_cx_new = self.lstm(X, hx, vec_hidden=False)
 
         pi = torch.distributions.Categorical(logits=self.mlp_pi(hx_cx_new[0]))
@@ -227,13 +261,18 @@ class PPOAEAgent(Agent):
             "clamp_ratio": 0.2,
             "lambda":0.97,
             'entropy_bonus_coef': 0.001,
+            'policy_loss_coef': 1.0,
             'value_loss_coef': 0.5,
             'reconstruction_loss_coef': 1.0,
             'reconstruction_loss_loss': 'l2',
             "gamma": 0.99,
             "bootstrap_values": True,
 
+            'predict_this_frame': True,
+
             'save_test_image': None,
+            'lstm_train_hidden_dropout': 0.0,
+            'lstm_train_input_dropout': 0.0,
     }
     default_model_config = {
         # The default values for the model configuration are set 
@@ -392,8 +431,9 @@ class PPOAEAgent(Agent):
         # Keep track of "streaks" of positive rewards.
         still_going = ~np.array(done).astype(bool)
         rew_ = np.array(rew)*still_going
-        self.episode_reward_streaks = (self.episode_reward_streaks + (rew_ > 0))*(rew_ >= 0)
-        self.logged_reward_counts[-1] += (rew_!=0)
+        min_streak_rew = 1.0
+        self.episode_reward_streaks = (self.episode_reward_streaks + (rew_ >= min_streak_rew))*(rew_ >= 0)
+        self.logged_reward_counts[-1] += (rew_>=min_streak_rew)
         self.logged_streaks[-1] = np.maximum(self.episode_reward_streaks, self.logged_streaks[-1])
         self.logged_rewards[-1] += rew*still_going
         self.logged_lengths[-1] += still_going
@@ -509,7 +549,8 @@ class PPOAEAgent(Agent):
         clamp_ratio = self.learning_config['clamp_ratio']
 
         # policy loss
-        pi, v_theta, rec = self.ac.pi_v_rec(data['obs'], data['hx_cx'], data['act'])
+        pi, v_theta, rec = self.ac.pi_v_rec(data['obs'], data['hx_cx'], data['act'], 
+            input_dropout=self.learning_config['lstm_train_input_dropout'])
 
         logp = pi.log_prob(data['act'])
 
@@ -525,7 +566,12 @@ class PPOAEAgent(Agent):
         loss_val = loss_val
 
         mask2 = mask[:,:-1]
-        loss_rec = (data['obs']['pov'][:, 1:,...]/255. - rec[:,:-1,...]).view(mask2.shape[0],mask2.shape[1],-1)
+
+        if self.config.get('predict_this_frame', True):
+            loss_rec = (data['obs']['pov'][:, :-1,...]/255. - rec[:,:-1,...]).view(mask2.shape[0],mask2.shape[1],-1)
+        else:
+            loss_rec = (data['obs']['pov'][:, 1:,...]/255. - rec[:,:-1,...]).view(mask2.shape[0],mask2.shape[1],-1)
+
         if (self.learning_config['reconstruction_loss_loss'] is not None) and (self.learning_config['reconstruction_loss_loss'] == 'l1'):
             loss_rec = (((loss_rec.abs()).mean(-1)*mask2).sum())/mask2.sum()
         else:
@@ -541,7 +587,6 @@ class PPOAEAgent(Agent):
             'sample_prediction': rec[0,0]
         }
 
-        # import pdb; pdb.set_trace()
         return loss_pi, loss_val, loss_ent, loss_rec, pi_info
 
     def check_kl(self, ac, data):
@@ -583,11 +628,21 @@ class PPOAEAgent(Agent):
             'max_reward_streak': np.max(self.logged_streaks),
             'reward_streak_15p': np.quantile(self.logged_streaks, 0.15),
             'reward_streak_85p': np.quantile(self.logged_streaks, 0.85),
+
             'mean_reward': np.mean(self.logged_rewards),
+            'ep_return_mean': np.mean(self.logged_rewards),
+            'ep_return_15p': np.quantile(self.logged_rewards, 0.15),
+            'ep_return_85p': np.quantile(self.logged_rewards, 0.85),
+            'ep_return_std': np.std(self.logged_rewards),
+            'ep_return_min': np.min(self.logged_rewards),
+            'ep_return_max': np.max(self.logged_rewards),
+
             'mean_length': np.mean(self.logged_lengths),
+
             'mean_reward_counts': np.mean(self.logged_reward_counts),
             'reward_counts_15p': np.quantile(self.logged_reward_counts, 0.15),
             'reward_counts_85p': np.quantile(self.logged_reward_counts, 0.85),
+
             'mean_streak_fraction': np.mean(np.array(self.logged_streaks)/np.array(self.logged_reward_counts).clip(1)),
         }
         self.reset_info()
@@ -639,6 +694,9 @@ class PPOAEAgent(Agent):
                 # Sample a minibatch of data with which to compute losses/update parameters.
                 minibatch_data = self.sample_replay_buffer(batch_size=hp["minibatch_size"], seq_len=hp["minibatch_seq_len"])
 
+                # Apply dropout to LSTM "hx" (but not "cx")
+                nn.functional.dropout(minibatch_data['hx_cx'][0,...], p=hp['lstm_train_hidden_dropout'], inplace=True)
+
                 with torch.set_grad_enabled(True):
                     self.optimizer.zero_grad()
 
@@ -648,9 +706,9 @@ class PPOAEAgent(Agent):
                     if i>hp['min_num_minibatches'] and loss_metrics['kl'] > 1.5 * hp['kl_target']:
                         break
 
-                    ( policy_loss +
+                    ( policy_loss * self.learning_config['policy_loss_coef'] +
+                      entropy_loss * self.learning_config['entropy_bonus_coef'] * self.learning_config['policy_loss_coef'] +
                       critic_loss * self.learning_config['value_loss_coef'] + 
-                      entropy_loss * self.learning_config['entropy_bonus_coef'] +
                       reconstruction_loss * self.learning_config['reconstruction_loss_coef']
                     ).backward()
 
