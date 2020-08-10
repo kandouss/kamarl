@@ -9,6 +9,7 @@ from kamarl.utils import space_to_dict, dict_to_space, combine_spaces
 from marlgrid.agents import GridAgentInterface
 from contextlib import contextmanager
 import warnings
+from io import BytesIO, TextIOWrapper
 
 
 class RLAgentBase(ABC):
@@ -138,9 +139,36 @@ class Agent(RLAgentBase):
         yield self
         self.end_episode()
 
+    @staticmethod
+    def parse_s3_uri(s3_uri):
+        from urllib.parse import urlparse
+        o = urlparse(s3_uri,  allow_fragments=False)
+        return {'bucket':o.netloc, 'key':o.path.strip('/')}
 
-    def save(self, save_dir, force=False):
+    def save(self, save_dir, fore=False):
+        if save_dir.startswith('s3'):
+            self.save_s3(save_dir, force=force)
+        else:
+            self.save_disk(save_dir, force=force)
+        
+    def save_s3(self, save_dir, force=False):
+        import boto3
+
+        model_data = io.BytesIO()
+        torch.save({mod: getattr(self, mod) for mod in self.save_modules}, model_data)
+        model_data.seek(0)
+        model_place = parse_s3_uri(os.path.join(save_dir, 'model.tar'))
+        boto3.client('s3').put_object(Bucket=model_place['bucket'], Key=model_place['key'], Body=model_data)
+
+        metadata_data = io.BytesIO()
+        json.dump(self._save_state, TextIOWrapper(metadata_data))
+        metadata_data.seek(0)
+        meta_place = parse_s3_uri(os.path.join(save_dir, 'metadata.json'))
+        boto3.client('s3').put_object(Bucket=meta_place['bucket'], Key=meta_place['key'], Body=metadata_data)
+
+    def save_disk(self, save_dir, force=False):
         save_dir = os.path.abspath(os.path.expanduser(save_dir))
+
         model_path = os.path.join(save_dir, 'model.tar')
         metadata_path = os.path.join(save_dir, 'metadata.json')
 
