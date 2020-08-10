@@ -284,21 +284,21 @@ class IndependentAgents(RLAgentBase):
         self.end_episode()
         
     def save(self, path, force=False):
-        path = os.path.abspath(os.path.expanduser(path))
-        metadata_file = os.path.join(path, 'multi_agent_meta.json')
-        if not os.path.isdir(path):
-            os.makedirs(path)
-        if force and os.path.isfile(metadata_file):
-            os.remove(metadata_file)
-        json.dump({
-            'n_agents': len(self.agents)
-            }, fp = open(metadata_file,'w')
-        )
+        if not path.lower().startswith('s3'):
+            path = os.path.abspath(os.path.expanduser(path))
+            metadata_file = os.path.join(path, 'multi_agent_meta.json')
+            if not os.path.isdir(path):
+                os.makedirs(path)
+            if force and os.path.isfile(metadata_file):
+                os.remove(metadata_file)
+            json.dump({
+                'n_agents': len(self.agents)
+                }, fp = open(metadata_file,'w')
+            )
         
         keys = [f'{x}' for x in range(len(self.agents))]
 
         for agent, key in zip(self.agents, keys):
-            print(os.path.join(path, key))
             agent.save(os.path.join(path, key), force=force)
 
     @classmethod
