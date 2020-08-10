@@ -157,13 +157,13 @@ class Agent(RLAgentBase):
     def save_s3(self, save_dir, force=False):
         import boto3
 
-        model_data = io.BytesIO()
+        model_data = BytesIO()
         torch.save({mod: getattr(self, mod) for mod in self.save_modules}, model_data)
         model_data.seek(0)
         model_place = parse_s3_uri(os.path.join(save_dir, 'model.tar'))
         boto3.client('s3').put_object(Bucket=model_place['bucket'], Key=model_place['key'], Body=model_data)
 
-        metadata_data = io.BytesIO()
+        metadata_data = BytesIO()
         json.dump(self._save_state, TextIOWrapper(metadata_data))
         metadata_data.seek(0)
         meta_place = parse_s3_uri(os.path.join(save_dir, 'metadata.json'))
