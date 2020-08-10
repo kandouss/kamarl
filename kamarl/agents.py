@@ -145,10 +145,13 @@ class Agent(RLAgentBase):
         o = urlparse(s3_uri,  allow_fragments=False)
         return {'bucket':o.netloc, 'key':o.path.strip('/')}
 
-    def save(self, save_dir, fore=False):
-        if save_dir.startswith('s3'):
+    def save(self, save_dir, force=False):
+        print("Saving checkpoint:", self.save_modules)
+        if save_dir.lower().startswith('s3'):
+            print(f"  (S3) --> {save_dir}")
             self.save_s3(save_dir, force=force)
         else:
+            print(f"  (local) --> {save_dir}")
             self.save_disk(save_dir, force=force)
         
     def save_s3(self, save_dir, force=False):
@@ -183,7 +186,6 @@ class Agent(RLAgentBase):
             if os.path.isfile(f):
                 os.remove(f)
 
-        print("Saving modules ", self.save_modules)
         torch.save({mod: getattr(self, mod) for mod in self.save_modules
                     }, model_path)
 

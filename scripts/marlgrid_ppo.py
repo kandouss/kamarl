@@ -17,8 +17,8 @@ from marlgrid.utils.video import GridRecorder
 
 
 run_time = datetime.datetime.now().strftime("%m_%d_%H:%M:%S")
-device = find_cuda_device('1080 Ti')[0]
-# device = torch.device('cpu')
+# device = find_cuda_device('1080 Ti')[0]/
+device = torch.device('cpu')
 
 save_root = os.path.abspath(os.path.expanduser(f'/tmp/marlgrid_ppo_refactor/{run_time}'))
 
@@ -189,7 +189,7 @@ for ep_num in range(num_episodes):
                 # import pdb; pdb.set_trace()
                 # print(ep_steps, tuple(action_array))
                 # time.sleep(0.1)
-                # env.render(show_agent_views=True)
+                env.render(show_agent_views=True)
                 # input()
 
                 ep_steps += 1
