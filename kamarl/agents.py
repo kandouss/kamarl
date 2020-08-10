@@ -165,7 +165,7 @@ class Agent(RLAgentBase):
 
         metadata_data = BytesIO()
         json.dump(self._save_state, TextIOWrapper(metadata_data))
-        metadata_data.seek(0)
+        # metadata_data.seek(0)
         meta_place = self.parse_s3_uri(os.path.join(save_dir, 'metadata.json'))
         boto3.client('s3').put_object(Bucket=meta_place['bucket'], Key=meta_place['key'], Body=metadata_data)
 
