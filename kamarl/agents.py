@@ -160,13 +160,13 @@ class Agent(RLAgentBase):
         model_data = BytesIO()
         torch.save({mod: getattr(self, mod) for mod in self.save_modules}, model_data)
         model_data.seek(0)
-        model_place = parse_s3_uri(os.path.join(save_dir, 'model.tar'))
+        model_place = self.parse_s3_uri(os.path.join(save_dir, 'model.tar'))
         boto3.client('s3').put_object(Bucket=model_place['bucket'], Key=model_place['key'], Body=model_data)
 
         metadata_data = BytesIO()
         json.dump(self._save_state, TextIOWrapper(metadata_data))
         metadata_data.seek(0)
-        meta_place = parse_s3_uri(os.path.join(save_dir, 'metadata.json'))
+        meta_place = self.parse_s3_uri(os.path.join(save_dir, 'metadata.json'))
         boto3.client('s3').put_object(Bucket=meta_place['bucket'], Key=meta_place['key'], Body=metadata_data)
 
     def save_disk(self, save_dir, force=False):
