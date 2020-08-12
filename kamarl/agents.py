@@ -205,7 +205,7 @@ class Agent(RLAgentBase):
             config_changes = {}
         model_path = get_file_from_s3(os.path.join(save_path, 'model.tar'))
         metadata = {
-            **json.load(get_file_from_s3(os.path.join(save_path, 'metadata.json'))),
+            **json.load(open(get_file_from_s3(os.path.join(save_path, 'metadata.json')),'r')),
             **config_changes
         }
 
