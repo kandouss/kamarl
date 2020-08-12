@@ -10,6 +10,7 @@ from marlgrid.agents import GridAgentInterface
 from contextlib import contextmanager
 import warnings
 from io import BytesIO, TextIOWrapper
+import tempfile
 
 
 class RLAgentBase(ABC):
@@ -145,6 +146,14 @@ class Agent(RLAgentBase):
         o = urlparse(s3_uri,  allow_fragments=False)
         return {'bucket':o.netloc, 'key':o.path.strip('/')}
 
+    @staticmethod
+    def get_file_from_s3(s3_path):
+        s3info = parse_s3_uri(s3_path)
+        s3_bucket, s3_key = s3info['bucket'], s3info['key']
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            boto3.client('s3').download_fileobj(s3info['bucket'], s3info['key'], f)
+        return f.name
+
     def save(self, save_dir, force=False):
         print("Saving checkpoint:", self.save_modules)
         if save_dir.lower().startswith('s3'):
@@ -191,7 +200,42 @@ class Agent(RLAgentBase):
         json.dump(self._save_state, open(metadata_path, "w"))
 
     @classmethod
-    def load(cls, save_dir, config_changes = {}, device=None):
+    def load_s3(cls, save_path, config_changes = None, device=None):
+        if config_changes is None:
+            config_changes = {}
+        meta_place = cls.parse_s3_uri()
+
+        model_path = cls.get_file_from_s3(os.path.join(save_path, 'model.tar'))
+        metadata = {
+            **json.load(cls.get_file_from_s3(os.path.join(save_path, 'metadata.json'))),
+            **config_changes
+        }
+
+        if metadata['class'] != cls.__name__:
+            warnings.warn(f"Attempting to load a {cls.__name__} from a {metadata['class']} checkpoint.")
+        ret = cls(**{k:v for k,v in metadata.items() if k != 'class'})
+
+        if device is None:
+            device = getattr(ret, 'device', None)
+        modules_dict = torch.load(model_path, map_location=device)
+        
+        for k,v in modules_dict.items():
+            try:
+                getattr(ret, k).load_state_dict(v.state_dict())
+            except:
+                rsd = getattr(ret, k).state_dict()
+                for net_name, net_params in v.state_dict().items():
+                    print(net_name, tuple(net_params.shape), tuple(rsd[net_name].shape))
+                print(f"Error loading {k}")
+                import pdb; pdb.set_trace()
+        del modules_dict
+        return ret
+
+
+    @classmethod
+    def load(cls, save_dir, config_changes = None, device=None):
+        if config_changes is None:
+            config_changes = {}
         print(f"Loading", cls.__name__)
         save_dir = os.path.abspath(os.path.expanduser(save_dir))
         model_path = os.path.join(save_dir, 'model.tar')
