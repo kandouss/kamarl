@@ -140,14 +140,12 @@ class Agent(RLAgentBase):
         yield self
         self.end_episode()
 
-    @staticmethod
-    def parse_s3_uri(s3_uri):
+    def parse_s3_uri(self,s3_uri):
         from urllib.parse import urlparse
         o = urlparse(s3_uri,  allow_fragments=False)
         return {'bucket':o.netloc, 'key':o.path.strip('/')}
 
-    @staticmethod
-    def get_file_from_s3(s3_path):
+    def get_file_from_s3(self,s3_path):
         s3info = parse_s3_uri(s3_path)
         s3_bucket, s3_key = s3info['bucket'], s3info['key']
         with tempfile.NamedTemporaryFile(delete=False) as f:
@@ -203,8 +201,6 @@ class Agent(RLAgentBase):
     def load_s3(cls, save_path, config_changes = None, device=None):
         if config_changes is None:
             config_changes = {}
-        meta_place = cls.parse_s3_uri()
-
         model_path = cls.get_file_from_s3(os.path.join(save_path, 'model.tar'))
         metadata = {
             **json.load(cls.get_file_from_s3(os.path.join(save_path, 'metadata.json'))),
