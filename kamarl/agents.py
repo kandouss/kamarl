@@ -14,6 +14,7 @@ import tempfile
 
 from urllib.parse import urlparse
 
+import boto3
 def parse_s3_uri( s3_uri):
     o = urlparse(s3_uri,  allow_fragments=False)
     return {'bucket':o.netloc, 'key':o.path.strip('/')}
