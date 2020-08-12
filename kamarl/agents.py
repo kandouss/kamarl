@@ -12,6 +12,18 @@ import warnings
 from io import BytesIO, TextIOWrapper
 import tempfile
 
+from urllib.parse import urlparse
+
+def parse_s3_uri( s3_uri):
+    o = urlparse(s3_uri,  allow_fragments=False)
+    return {'bucket':o.netloc, 'key':o.path.strip('/')}
+
+def get_file_from_s3( s3_path):
+    s3info = parse_s3_uri(s3_path)
+    s3_bucket, s3_key = s3info['bucket'], s3info['key']
+    with tempfile.NamedTemporaryFile(delete=False) as f:
+        boto3.client('s3').download_fileobj(s3info['bucket'], s3info['key'], f)
+    return f.name
 
 class RLAgentBase(ABC):
 
@@ -140,17 +152,6 @@ class Agent(RLAgentBase):
         yield self
         self.end_episode()
 
-    def parse_s3_uri(self,s3_uri):
-        from urllib.parse import urlparse
-        o = urlparse(s3_uri,  allow_fragments=False)
-        return {'bucket':o.netloc, 'key':o.path.strip('/')}
-
-    def get_file_from_s3(self,s3_path):
-        s3info = parse_s3_uri(s3_path)
-        s3_bucket, s3_key = s3info['bucket'], s3info['key']
-        with tempfile.NamedTemporaryFile(delete=False) as f:
-            boto3.client('s3').download_fileobj(s3info['bucket'], s3info['key'], f)
-        return f.name
 
     def save(self, save_dir, force=False):
         print("Saving checkpoint:", self.save_modules)
@@ -167,10 +168,10 @@ class Agent(RLAgentBase):
         model_data = BytesIO()
         torch.save({mod: getattr(self, mod) for mod in self.save_modules}, model_data)
         model_data.seek(0)
-        model_place = self.parse_s3_uri(os.path.join(save_dir, 'model.tar'))
+        model_place = parse_s3_uri(os.path.join(save_dir, 'model.tar'))
         boto3.client('s3').put_object(Bucket=model_place['bucket'], Key=model_place['key'], Body=model_data)
 
-        meta_place = self.parse_s3_uri(os.path.join(save_dir, 'metadata.json'))
+        meta_place = parse_s3_uri(os.path.join(save_dir, 'metadata.json'))
         boto3.client('s3').put_object(Bucket=meta_place['bucket'], Key=meta_place['key'], Body=str(json.dumps(self._save_state)))
 
     def save_disk(self, save_dir, force=False):
@@ -201,9 +202,9 @@ class Agent(RLAgentBase):
     def load_s3(cls, save_path, config_changes = None, device=None):
         if config_changes is None:
             config_changes = {}
-        model_path = cls.get_file_from_s3(os.path.join(save_path, 'model.tar'))
+        model_path = get_file_from_s3(os.path.join(save_path, 'model.tar'))
         metadata = {
-            **json.load(cls.get_file_from_s3(os.path.join(save_path, 'metadata.json'))),
+            **json.load(get_file_from_s3(os.path.join(save_path, 'metadata.json'))),
             **config_changes
         }
 
