@@ -163,7 +163,8 @@ class Agent(RLAgentBase):
         model_place = self.parse_s3_uri(os.path.join(save_dir, 'model.tar'))
         boto3.client('s3').put_object(Bucket=model_place['bucket'], Key=model_place['key'], Body=model_data)
 
-        boto3.client('s3').put_object(Bucket=model_place['bucket'], Key=model_place['key'], Body=str(json.dumps(self._save_state)))
+        meta_place = self.parse_s3_uri(os.path.join(save_dir, 'metadata.json'))
+        boto3.client('s3').put_object(Bucket=meta_place['bucket'], Key=meta_place['key'], Body=str(json.dumps(self._save_state)))
 
     def save_disk(self, save_dir, force=False):
         save_dir = os.path.abspath(os.path.expanduser(save_dir))
