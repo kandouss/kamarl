@@ -280,7 +280,7 @@ class PPOAEAgent(Agent):
         #  those defaults.
     }
     save_modules = ['ac', 'optimizer']
-    def __init__(self, observation_space, action_space, learning_config=None, model_config=None, metadata=None, train_history=None):
+    def __init__(self, observation_space, action_space, learning_config=None, model_config=None, metadata=None, train_history=None, counts=None):
         if learning_config is None: learning_config = {}
         if model_config is None: model_config = {}
         if metadata is None: metadata = {}
