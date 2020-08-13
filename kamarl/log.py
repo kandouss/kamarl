@@ -62,7 +62,9 @@ class WandbLogger(Logger):
         assert isinstance(key_path, list)
         super().__init__(name, project=project, run_logger=run_logger, key_path=key_path)
         if run_logger is None:
-            self.run_logger = wandb.init(self.name, project=project, tags=[name], **wandb_init_kwargs)
+            tags = wandb_init_kwargs.get('tags', [])
+            wandb_init_kwargs = {k:v for k,v in wandb_init_kwargs if k != 'tags'}
+            self.run_logger = wandb.init(self.name, project=project, tags=[name, *tags], **wandb_init_kwargs)
             self.run_logger.save()
             self.run_name = self.run_logger.name
         else:
