@@ -11,6 +11,7 @@ from contextlib import contextmanager
 import warnings
 from io import BytesIO, TextIOWrapper
 import tempfile
+from collections import defaultdict
 
 from urllib.parse import urlparse
 
@@ -62,6 +63,7 @@ class Agent(RLAgentBase):
         self.metadata = metadata
         self.train_history = train_history
         self.updates_since_history_update = 0
+        self.counts = defaultdict(int)
 
     @property
     def _save_state(self):
@@ -73,7 +75,11 @@ class Agent(RLAgentBase):
             'model_config': self.model_config,
             'metadata': self.metadata,
             'train_history': self.updated_train_history,
+            'counts': dict(self.counts)
         }
+
+    def reset_counts(self):
+        self.counts = defaultdict(int)
 
     @property
     def updated_train_history(self):

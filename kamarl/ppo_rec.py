@@ -324,7 +324,6 @@ class PPOAEAgent(Agent):
         self.reset_hidden()
         self.reset_state()
         self.reset_info()
-        self.counts = defaultdict(int)
 
     @property
     def updated_train_history(self):
@@ -335,6 +334,7 @@ class PPOAEAgent(Agent):
             'n_updates': self.counts['updates'],
             'n_episodes': self.counts['episodes']
         }]
+)
     @property
     def config(self):
         return {
