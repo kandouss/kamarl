@@ -334,7 +334,7 @@ class PPOAEAgent(Agent):
             'n_updates': self.counts['updates'],
             'n_episodes': self.counts['episodes']
         }]
-)
+
     @property
     def config(self):
         return {
