@@ -53,7 +53,10 @@ class RLAgentBase(ABC):
 
 class Agent(RLAgentBase):
     save_modules = []
-    def __init__(self, observation_space, action_space, metadata={}, train_history=[], logger=None):
+    def __init__(self, observation_space, action_space, metadata=None, train_history=None, counts=None, logger=None):
+        if metadata is None: metadata = {}
+        if train_history is None: train_history = []
+        if counts is None: counts = defaultdict(int)
 
         self.logger = logger
         self.observation_space = self.ensure_space(observation_space)
