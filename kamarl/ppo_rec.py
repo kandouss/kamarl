@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import os
+import time
 import pickle
 import warnings
 
@@ -654,6 +655,7 @@ class PPOAEAgent(Agent):
         self.reset_info()
 
         if bool(self.training):
+            opt_start_time = time.time()
             hp = self.learning_config
             device = self.device
 
@@ -766,7 +768,7 @@ class PPOAEAgent(Agent):
             steps = np.array([len(e) for e in self.replay_memory.episodes])
             mean_val = mean([e.val.mean() for e in self.replay_memory.episodes])
             mean_clip_frac = mean([pd['cf'] for pd in pi_infos])
-
+            opt_end_time = time.time()
             log_data = {
                 **log_data,
                 'n_minibatch_steps': n_minibatches,
@@ -781,6 +783,7 @@ class PPOAEAgent(Agent):
                 'kl_final_minibatch': final_minibatch_kl,
                 'kl_final': kl_after,
                 'used_backup': used_backup,
+                'update_time_s': opt_end_time - opt_start_time
             }
                 
 
