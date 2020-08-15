@@ -181,16 +181,6 @@ class DeconvNet(nn.Module):
             nc = layer.in_channels
         return (nc,w,h)
 
-# mods = [
-#     nn.ConvTranspose2d(4, 16, kernel_size=3, stride=1),
-#     nn.ConvTranspose2d(16, 16, kernel_size=3, stride=1),
-#     nn.ConvTranspose2d(16, 16, kernel_size=3, stride=1),
-#     nn.ConvTranspose2d(16, 3, kernel_size=3, stride=2),
-# ]
-# # ret = DeconvNet._get_input_size((64,64), mods)
-# ret = DeconvNet(*mods)
-# print(ret(torch.randn(128)).shape)
-
 
 @torch.jit.script
 def lstm_forward(X, hx, weight_ih, weight_hh, bias_ih, bias_hh):
@@ -224,12 +214,9 @@ class SeqLSTM(nn.RNNCellBase):
 
     def __init__(self, input_size, hidden_size):
         super().__init__(input_size=input_size, hidden_size=hidden_size, bias=True, num_chunks=4)
-        
         self._init_parameters()
 
-    def _init_parameters(self):
-        return
-        
+    def _init_parameters(self):        
         # orthogonal initialization of recurrent weights
         # w_ii, w_if, w_ic, w_io = cell.weight_ih.chunk(4, 0)
         for weight in self.weight_ih.chunk(4, 0):
@@ -247,7 +234,7 @@ class SeqLSTM(nn.RNNCellBase):
 
         nn.init.constant_(b_if, 2.0)
         nn.init.constant_(b_hf, 2.0)
-        self.reset_parameters()
+        # self.reset_parameters()
         
     def forward(self, X, hx=None, vec_hidden=False):
         out_shape = (*X.shape[:-1], self.hidden_size)

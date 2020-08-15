@@ -269,7 +269,7 @@ class PPOAEAgent(Agent):
             "gamma": 0.99,
             "bootstrap_values": True,
 
-            'predict_this_frame': True,
+            'predict_this_frame': False,
 
             'save_test_image': None,
             'lstm_train_hidden_dropout': 0.0,
