@@ -3,7 +3,7 @@ import numpy as np
 import torch.nn as nn
 
 import datetime, time
-import os
+import os, copy
 
 from kamarl.ppo_rec import PPOAEAgent
 from kamarl.utils import find_cuda_device, count_parameters
@@ -54,6 +54,7 @@ agent_interface_config = {
     'view_tile_size': 3,
     'view_size': 7,
     'view_offset': 1,
+    'view_downsample_mode': 'max',
     'observation_style': 'rich',
     'prestige_beta': 0.95, # determines the rate at which prestige decays
     'color': 'prestige',
@@ -94,25 +95,26 @@ n_new_agents = 2 # Number of new agents to be created with the above config/hype
 
 grid_agents = []
 new_agents_info = [
-    {'interface_config': agent_interface_config, 'learning_config': ppo_learning_config, 'model_config': ppo_model_config}
+    {'interface_config': copy.deepcopy(agent_interface_config), 'learning_config': copy.deepcopy(ppo_learning_config), 'model_config': copy.deepcopy(ppo_model_config)}
     for _ in range(n_new_agents)
 ]
-
+new_agents_info[0]['interface_config']['view_downsample_mode'] = 'mean'
 grid_agents = []
 
 for agent_load_path in load_agents:
     grid_agents.append(PPOAEAgent.load(agent_load_path))
 
 
-for agent_info in new_agents_info:
+for k,agent_info in enumerate(new_agents_info):
     iface = GridAgentInterface(**agent_info['interface_config'])
+    
     new_fella = PPOAEAgent(
         observation_space=iface.observation_space,
         action_space=iface.action_space, 
         learning_config=agent_info['learning_config'],
         model_config=agent_info['model_config'],
     )
-    new_fella.metadata['marlgrid_interface'] = agent_interface_config
+    new_fella.metadata['marlgrid_interface'] = agent_info['interface_config']
     grid_agents.append(new_fella)
 
 

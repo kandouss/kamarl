@@ -5,6 +5,7 @@ import inspect
 import itertools
 import numba
 import copy
+import collections.abc
 
 @numba.njit(numba.float32[:](numba.float32[:], numba.float32))
 def discount_rewards(rewards, gamma):
@@ -26,6 +27,13 @@ def find_cuda_device(device_name=''):
     matching_cuda_devices = [dev for dev in cuda_devices if (device_name.lower() in torch.cuda.get_device_name(dev).lower())]
     return matching_cuda_devices
     
+def update_config(d, u):
+    for k, v in u.items():
+        if isinstance(v, collections.abc.Mapping):
+            d[k] = update_config(d.get(k, {}), v)
+        else:
+            d[k] = v
+    return d
 
 def chunked_iterable(iterable, size):
     it = iter(iterable)

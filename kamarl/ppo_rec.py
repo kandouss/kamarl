@@ -782,7 +782,7 @@ class PPOAEAgent(Agent):
                 'n_hidden_updates': n_hidden_updates,
                 'kl_final_minibatch': final_minibatch_kl,
                 'kl_final': kl_after,
-                'used_backup': used_backup,
+                'used_backup': 1*used_backup,
                 'update_time_s': opt_end_time - opt_start_time
             }
                 

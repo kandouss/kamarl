@@ -5,8 +5,6 @@ import numpy as np
 import types
 import gym
 from abc import ABC, abstractmethod, abstractproperty
-from kamarl.utils import space_to_dict, dict_to_space, combine_spaces
-from marlgrid.agents import GridAgentInterface
 from contextlib import contextmanager
 import warnings
 from io import BytesIO, TextIOWrapper
@@ -16,6 +14,16 @@ from collections import defaultdict
 from urllib.parse import urlparse
 
 import boto3
+
+from marlgrid.agents import GridAgentInterface
+
+from kamarl.utils import (
+    space_to_dict,
+    dict_to_space,
+    combine_spaces,
+    update_config
+)
+
 def parse_s3_uri( s3_uri):
     o = urlparse(s3_uri,  allow_fragments=False)
     return {'bucket':o.netloc, 'key':o.path.strip('/')}
@@ -213,10 +221,10 @@ class Agent(RLAgentBase):
         if config_changes is None:
             config_changes = {}
         model_path = get_file_from_s3(os.path.join(save_path, 'model.tar'))
-        metadata = {
-            **json.load(open(get_file_from_s3(os.path.join(save_path, 'metadata.json')),'r')),
-            **config_changes
-        }
+        metadata = update_config(
+            json.load(open(get_file_from_s3(os.path.join(save_path, 'metadata.json')),'r')),
+            config_changes
+        )
 
         if metadata['class'] != cls.__name__:
             warnings.warn(f"Attempting to load a {cls.__name__} from a {metadata['class']} checkpoint.")
@@ -248,8 +256,7 @@ class Agent(RLAgentBase):
         model_path = os.path.join(save_dir, 'model.tar')
         metadata_path = os.path.join(save_dir, 'metadata.json')
 
-        metadata = json.load(open(metadata_path,'r'))
-        metadata = {**metadata, **config_changes}
+        metadata = update_config(json.load(open(metadata_path,'r')), config_changes)
 
         if metadata['class'] != cls.__name__:
             warnings.warn(f"Attempting to load a {cls.__name__} from a {metadata['class']} checkpoint.")
