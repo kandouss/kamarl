@@ -92,7 +92,22 @@ class ConvNet(nn.Module):
         else:
             self.output_nonlinearity = None
 
-        self._init_parameters()
+        # self._init_parameters()
+        # dev = next(self.parameters()).device
+        # test_input = torch.from_numpy(np.random.randint(low=0, high=255, size=(1,*input_shape))).to(dev)
+        # test_input2 = torch.from_numpy(np.random.randint(low=0, high=255, size=(1,*input_shape))).to(dev)
+        # for k, mod in enumerate(self.mods):
+        #     print(f"layer {k}")
+        #     print(f"\t {mod}")
+        #     print(f"\t {count_parameters(mod)} parameters")
+        #     print(f"\t size before: {int(np.prod(test_input.shape))}")
+        #     test_input = mod(test_input)
+        #     print(f"\t size after: {int(np.prod(test_input.shape))}")
+        # print("")
+        # print(f"Output shape: {tuple(test_input.shape)} ({int(np.prod(test_input.shape))} vals)")
+        # print(f"self n is {self.n}")
+        # print()
+        # import pdb; pdb.set_trace()
 
     def _init_parameters(self):
         for k,layer in enumerate(self.mods):
@@ -144,7 +159,7 @@ class DeconvNet(nn.Module):
         # self.nlin = nn.Sigmoid()
         print(f"DECONV FC is {self.fc}")
         print(f"   DC SHAPE  {self.dc_shape}")
-        self._init_parameters()
+        # self._init_parameters()
 
     def _init_parameters(self):
         # import pdb; pdb.set_trace()
@@ -214,7 +229,7 @@ class SeqLSTM(nn.RNNCellBase):
 
     def __init__(self, input_size, hidden_size):
         super().__init__(input_size=input_size, hidden_size=hidden_size, bias=True, num_chunks=4)
-        self._init_parameters()
+        # self._init_parameters()
 
     def _init_parameters(self):        
         # orthogonal initialization of recurrent weights

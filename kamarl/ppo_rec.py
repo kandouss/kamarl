@@ -43,6 +43,7 @@ class PPOLSTM(nn.Module):
         'lstm_hidden_size': 256,
         'val_mlp_layers': [64,64],
         'pi_mlp_layers': [64,64],
+        'fancy_init': True
     }
     
 
@@ -125,14 +126,6 @@ class PPOLSTM(nn.Module):
             n_latent = self.config['lstm_hidden_size'] + action_space.n,
             image_size=input_image_shape
         )
-        # from kamarl.utils import count_parameters
-
-        # print(self.deconv_layers)
-        # print(count_parameters(self.deconv_layers))
-        # exit()
-
-
-
         self.mlp_val = make_mlp(
             layer_sizes=[self.lstm.hidden_size, *self.config['val_mlp_layers'], 1],
             nonlinearity=nn.Tanh,
@@ -144,6 +137,11 @@ class PPOLSTM(nn.Module):
             nonlinearity=nn.Tanh,
             output_nonlinearity=None
         )
+
+        if self.config['fancy_init']:
+            for mod in self.modules():
+                if hasattr(mod, '_init_parameters'):
+                    mod._init_parameters()
 
     def empty_hidden(self, numpy=False):
         if numpy:
@@ -216,7 +214,6 @@ class PPOLSTM(nn.Module):
 
     def pi_v_rec(self, X, hx, act, return_hidden=False, input_dropout=0.0):
         X = self.input_layers(X)
-        # import pdb; pdb.set_trace()
         X = nn.functional.dropout(X, p=input_dropout)
 
         hx_cx_new = self.lstm(X, hx, vec_hidden=False)
@@ -267,6 +264,7 @@ class PPOAEAgent(Agent):
             'reconstruction_loss_coef': 1.0,
             'reconstruction_loss_loss': 'l2',
             "gamma": 0.99,
+
             "bootstrap_values": True,
 
             'predict_this_frame': False,
@@ -299,7 +297,7 @@ class PPOAEAgent(Agent):
             warnings.warn(f"Specified unknown keys in {self.__class__.__name__} learning config: ", novel_keys)
         
         self.ac = PPOLSTM(self.observation_space, self.action_space, config=model_config)
-        self.ac_backup = copy.deepcopy(self.ac)
+        # self.ac_backup = copy.deepcopy(self.ac)
 
         self.model_config = self.ac.config
         
@@ -574,7 +572,7 @@ class PPOAEAgent(Agent):
 
         mask2 = mask[:,:-1]
 
-        if self.config.get('predict_this_frame', True):
+        if bool(self.learning_config['predict_this_frame']):
             loss_rec = (data['obs']['pov'][:, :-1,...]/255. - rec[:,:-1,...]).view(mask2.shape[0],mask2.shape[1],-1)
         else:
             loss_rec = (data['obs']['pov'][:, 1:,...]/255. - rec[:,:-1,...]).view(mask2.shape[0],mask2.shape[1],-1)
