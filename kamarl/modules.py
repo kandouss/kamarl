@@ -109,11 +109,11 @@ class ConvNet(nn.Module):
         # print()
         # import pdb; pdb.set_trace()
 
-    def _init_parameters(self):
-        for k,layer in enumerate(self.mods):
-            if isinstance(layer, nn.Conv2d):
-                nn.init.orthogonal_(layer.weight, nn.init.calculate_gain('relu'))
-                nn.init.zeros_(layer.bias)
+    # def _init_parameters(self):
+    #     for k,layer in enumerate(self.mods):
+    #         if isinstance(layer, nn.Conv2d):
+    #             nn.init.orthogonal_(layer.weight, nn.init.calculate_gain('relu'))
+    #             nn.init.zeros_(layer.bias)
 
     def show_shapes(self):
         X = torch.randn(self.input_shape)[None,...]
@@ -163,10 +163,11 @@ class DeconvNet(nn.Module):
 
     def _init_parameters(self):
         # import pdb; pdb.set_trace()
-        for k,layer in enumerate(self.mods):
-            if isinstance(layer, nn.ConvTranspose2d):
-                nn.init.orthogonal_(layer.weight, nn.init.calculate_gain('relu'))
-                nn.init.zeros_(layer.bias)
+        # for k,layer in enumerate(self.mods):
+        #     if isinstance(layer, nn.ConvTranspose2d):
+        #         nn.init.orthogonal_(layer.weight, nn.init.calculate_gain('relu'))
+        #         nn.init.zeros_(layer.bias)
+        pass
                 
     def forward(self, X):
         in_shape = [-1, *self.dc_shape]

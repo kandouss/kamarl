@@ -22,13 +22,18 @@ import copy
 
 
 def update_config_dict(base_config, new_config):
-    novel_keys = []
     updated_config = copy.deepcopy(base_config)
     for k,v in new_config.items():
         if k not in base_config:
-            novel_keys.append(k)
-        updated_config[k] = v
-    return updated_config, novel_keys
+            raise ValueError(f"Attempted to set new key {k} in config {base_config}.\n\tNot allowed!")
+        if isinstance(base_config[k], dict) or isinstance(v, dict):
+            if not (isinstance(base_config[k], dict) and isinstance(v, dict)):
+                raise ValueError("Attempted to merge a dict and non-dict")
+            else:
+                updated_config[k] = update_config_dict(base_config[k], v)
+        else:
+            updated_config[k] = v
+    return updated_config
         
 
 
@@ -58,9 +63,7 @@ class PPOLSTM(nn.Module):
                 f"{self.__class__.__name__} only supports discrete action spaces"
             )
 
-        self.config, novel_keys = update_config_dict(self.default_config, config)
-        if len(novel_keys) > 0:
-            warnings.warn(f"Specified unknown keys in {self.__class__.__name__} model config: ", novel_keys)
+        self.config = update_config_dict(self.default_config, config)
 
         super().__init__()
 
@@ -292,9 +295,7 @@ class PPOAEAgent(Agent):
             train_history=train_history,
             counts=counts)
 
-        self.learning_config, novel_keys = update_config_dict(self.default_learning_config, learning_config)
-        if len(novel_keys) > 0:
-            warnings.warn(f"Specified unknown keys in {self.__class__.__name__} learning config: ", novel_keys)
+        self.learning_config = update_config_dict(self.default_learning_config, learning_config)
         
         self.ac = PPOLSTM(self.observation_space, self.action_space, config=model_config)
         # self.ac_backup = copy.deepcopy(self.ac)
@@ -580,7 +581,7 @@ class PPOAEAgent(Agent):
         if (self.learning_config['reconstruction_loss_loss'] is not None) and (self.learning_config['reconstruction_loss_loss'] == 'l1'):
             loss_rec = (((loss_rec.abs()).mean(-1)*mask2).sum())/mask2.sum()
         else:
-            loss_rec = (((loss_rec**2.0).mean(-1)*mask2).sum())/mask2.sum()
+            loss_rec = ((((loss_rec**2.0).mean(-1)*mask2).sum())/mask2.sum())**0.5
 
         ent = pi.entropy().sum().item()/N
         clipped = ratio.gt(1+clamp_ratio) | ratio.lt(1-clamp_ratio)
@@ -706,6 +707,7 @@ class PPOAEAgent(Agent):
                 with torch.set_grad_enabled(True):
                     self.optimizer.zero_grad()
 
+                    # loss_pi, loss_val, loss_ent, loss_rec, pi_info
                     policy_loss, critic_loss, entropy_loss, reconstruction_loss, loss_metrics = self.compute_loss(minibatch_data)
 
                     # If est_kl(current_policy, policy_at_start_of_updates) have diverged, then stop updating parameters.
