@@ -48,7 +48,8 @@ class PPOLSTM(nn.Module):
         'lstm_hidden_size': 256,
         'val_mlp_layers': [64,64],
         'pi_mlp_layers': [64,64],
-        'fancy_init': True
+        'fancy_init': True,
+        'conv_nonlinearity': 'relu',
     }
     
 
@@ -56,13 +57,14 @@ class PPOLSTM(nn.Module):
             self,
             observation_space,
             action_space,
-            config = {}
+            config = None
         ):
+        if config is None:
+            config = {}
         if not isinstance(action_space, gym.spaces.Discrete):
             raise ValueError(
                 f"{self.__class__.__name__} only supports discrete action spaces"
             )
-
         self.config = update_config_dict(self.default_config, config)
 
         super().__init__()
@@ -78,13 +80,21 @@ class PPOLSTM(nn.Module):
 
         trunk = []
 
+        if self.config['conv_nonlinearity'].lower() == 'relu':
+            nlin_hook = nn.ReLU
+        elif  self.config['conv_nonlinearity'].lower() == 'leaky_relu':
+            nlin_hook = nn.LeakyReLU
+        elif  self.config['conv_nonlinearity'].lower() == 'elu':
+            nlin_hook = nn.ELU
+        else:
+            raise ValueError("not sure what relu mode should be.")
         in_channels = 3 # todo: infer number of image channels from observation space shape.
         conv_layers = []
         for k,c in enumerate(self.config['conv_layers']):
             conv_layers.append(nn.Conv2d(in_channels, **c))
             in_channels = c['out_channels']
             if k < len(self.config['conv_layers']) - 1:
-                conv_layers.append(nn.ReLU(inplace=True))
+                conv_layers.append(nlin_hook(inplace=True))
 
         self.conv_layers = ConvNet(
             *conv_layers,
@@ -94,7 +104,7 @@ class PPOLSTM(nn.Module):
 
         self.combined_input_layers = make_mlp(
             [self.conv_layers.n + n_flat_inputs, *self.config['input_trunk_layers']],
-            nonlinearity=nn.ReLU,
+            nonlinearity=nlin_hook,
             output_nonlinearity=nn.Tanh)
         
         tmp = [x.out_features for x in self.combined_input_layers if hasattr(x, 'out_features')]
@@ -122,7 +132,7 @@ class PPOLSTM(nn.Module):
             deconv_layers.append(nn.ConvTranspose2d(out_channels=out_channels, **c))
             out_channels = c['in_channels']
             if k < len(deconv_layers_config) - 1:
-                deconv_layers.append(nn.ReLU(inplace=True))
+                deconv_layers.append(nlin_hook(inplace=True))
 
         self.deconv_layers = DeconvNet(
             *deconv_layers[::-1],
@@ -571,17 +581,19 @@ class PPOAEAgent(Agent):
         loss_ent = - pi.entropy().sum()/N
         loss_val = loss_val
 
-        mask2 = mask[:,:-1]
-
+        ## Calculate reconstruction loss
+        mask2 = mask[:, :-1, None, None, None].float()
         if bool(self.learning_config['predict_this_frame']):
-            loss_rec = (data['obs']['pov'][:, :-1,...]/255. - rec[:,:-1,...]).view(mask2.shape[0],mask2.shape[1],-1)
+            # If we're reconstructing the current frame (rather than next frame)
+            rec_tgt = data['obs']['pov'][:, :-1, ...].float()/255.0
         else:
-            loss_rec = (data['obs']['pov'][:, 1:,...]/255. - rec[:,:-1,...]).view(mask2.shape[0],mask2.shape[1],-1)
+            rec_tgt = data['obs']['pov'][:, 1:, ...].float()/255.0
+        if self.learning_config['reconstruction_loss_loss'] == 'l1':
+            loss_rec = nn.functional.l1_loss(rec[:,:-1,...]*mask2, rec_tgt*mask2)/torch.mean(mask2)
+        else:
+            rec_err = (rec_tgt - rec[:,:-1,...])
+            loss_rec = (torch.mean( (rec_err * mask2)**2.0 )/torch.mean(mask2))**0.5
 
-        if (self.learning_config['reconstruction_loss_loss'] is not None) and (self.learning_config['reconstruction_loss_loss'] == 'l1'):
-            loss_rec = (((loss_rec.abs()).mean(-1)*mask2).sum())/mask2.sum()
-        else:
-            loss_rec = ((((loss_rec**2.0).mean(-1)*mask2).sum())/mask2.sum())**0.5
 
         ent = pi.entropy().sum().item()/N
         clipped = ratio.gt(1+clamp_ratio) | ratio.lt(1-clamp_ratio)

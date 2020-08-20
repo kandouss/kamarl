@@ -20,16 +20,17 @@ def device_of(mod):
     return next(mod.parameters()).device
 
 def make_mlp(layer_sizes, nonlinearity=nn.Tanh, output_nonlinearity=None, gain=None):
-    if gain is None:
-        gain = nn.init.calculate_gain({nn.Tanh:'tanh', nn.ReLU:'relu'}.get(nonlinearity, 'relu'))
+    # if gain is None:
+    #     gain = nn.init.calculate_gain({nn.Tanh:'tanh', nn.ReLU:'relu'}.get(nonlinearity, 'relu'))
     layers = []
     last_size = layer_sizes[0]
     for k,size in enumerate(layer_sizes[1:]):
         if k>0:
             layers.append(nonlinearity())
         layers.append(nn.Linear(last_size, size))
-        nn.init.orthogonal_(layers[-1].weight, gain)
-        nn.init.zeros_(layers[-1].bias)
+        # nn.init.orthogonal_(layers[-1].weight, gain)
+        # nn.init.constant_(layers[-1].bias, 0.1)
+        # nn.init.zeros_(layers[-1].bias)
         last_size = size
     if len(layers) > 0:
         if output_nonlinearity is not None:
@@ -92,28 +93,13 @@ class ConvNet(nn.Module):
         else:
             self.output_nonlinearity = None
 
-        # self._init_parameters()
-        # dev = next(self.parameters()).device
-        # test_input = torch.from_numpy(np.random.randint(low=0, high=255, size=(1,*input_shape))).to(dev)
-        # test_input2 = torch.from_numpy(np.random.randint(low=0, high=255, size=(1,*input_shape))).to(dev)
-        # for k, mod in enumerate(self.mods):
-        #     print(f"layer {k}")
-        #     print(f"\t {mod}")
-        #     print(f"\t {count_parameters(mod)} parameters")
-        #     print(f"\t size before: {int(np.prod(test_input.shape))}")
-        #     test_input = mod(test_input)
-        #     print(f"\t size after: {int(np.prod(test_input.shape))}")
-        # print("")
-        # print(f"Output shape: {tuple(test_input.shape)} ({int(np.prod(test_input.shape))} vals)")
-        # print(f"self n is {self.n}")
-        # print()
-        # import pdb; pdb.set_trace()
 
-    # def _init_parameters(self):
-    #     for k,layer in enumerate(self.mods):
-    #         if isinstance(layer, nn.Conv2d):
-    #             nn.init.orthogonal_(layer.weight, nn.init.calculate_gain('relu'))
-    #             nn.init.zeros_(layer.bias)
+    def _init_parameters(self):
+        for k,layer in enumerate(self.mods):
+            if isinstance(layer, nn.Conv2d):
+                nn.init.orthogonal_(layer.weight, nn.init.calculate_gain('relu'))
+                nn.init.constant_(layer.bias, 0.05)
+                # nn.init.zeros_(layer.bias)
 
     def show_shapes(self):
         X = torch.randn(self.input_shape)[None,...]
@@ -163,11 +149,10 @@ class DeconvNet(nn.Module):
 
     def _init_parameters(self):
         # import pdb; pdb.set_trace()
-        # for k,layer in enumerate(self.mods):
-        #     if isinstance(layer, nn.ConvTranspose2d):
-        #         nn.init.orthogonal_(layer.weight, nn.init.calculate_gain('relu'))
-        #         nn.init.zeros_(layer.bias)
-        pass
+        for k,layer in enumerate(self.mods):
+            if isinstance(layer, nn.ConvTranspose2d):
+                nn.init.orthogonal_(layer.weight, nn.init.calculate_gain('relu'))
+                nn.init.constant_(layer.bias, 0.05)
                 
     def forward(self, X):
         in_shape = [-1, *self.dc_shape]
