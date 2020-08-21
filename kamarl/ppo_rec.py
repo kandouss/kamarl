@@ -50,6 +50,7 @@ class PPOLSTM(nn.Module):
         'pi_mlp_layers': [64,64],
         'fancy_init': True,
         'conv_nonlinearity': 'relu',
+        'norm': False,
     }
     
 
@@ -95,6 +96,8 @@ class PPOLSTM(nn.Module):
             in_channels = c['out_channels']
             if k < len(self.config['conv_layers']) - 1:
                 conv_layers.append(nlin_hook(inplace=True))
+                if self.config['norm']:
+                    conv_layers.append(nn.BatchNorm2d(num_features=in_channels))
 
         self.conv_layers = ConvNet(
             *conv_layers,
@@ -133,6 +136,8 @@ class PPOLSTM(nn.Module):
             out_channels = c['in_channels']
             if k < len(deconv_layers_config) - 1:
                 deconv_layers.append(nlin_hook(inplace=True))
+                if self.config['norm']:
+                    conv_layers.append(nn.BatchNorm2d(num_features=out_channels))
 
         self.deconv_layers = DeconvNet(
             *deconv_layers[::-1],
@@ -266,7 +271,11 @@ class PPOAEAgent(Agent):
             "hidden_update_n_parallel": 32,
             "minibatch_size": 256,
             "minibatch_seq_len": 10,
+
+            'optimizer': 'adam',
             'learning_rate': 3.e-4,
+            "weight_decay": 0,
+
             "kl_target": 0.01,
             "kl_hard_limit": 0.03,
             "clamp_ratio": 0.2,
@@ -285,6 +294,7 @@ class PPOAEAgent(Agent):
             'save_test_image': None,
             'lstm_train_hidden_dropout': 0.0,
             'lstm_train_input_dropout': 0.0,
+            'lstm_grad_clip': 10.0,
     }
     default_model_config = {
         # The default values for the model configuration are set 
@@ -404,9 +414,18 @@ class PPOAEAgent(Agent):
             self.optimizer.load_state_dict(tmp)
 
     def reset_optimizer(self):
-        self.optimizer = torch.optim.Adam(
-            self.ac.parameters(),
-            lr = self.learning_config['learning_rate'])
+        if self.learning_config['optimizer'].lower() == 'adam':
+            self.optimizer = torch.optim.Adam(
+                self.ac.parameters(),
+                lr = self.learning_config['learning_rate'],
+                weight_decay = self.learning_config['weight_decay']
+            )
+        elif self.learning_config['optimizer'].lower() == 'adamw':
+            self.optimizer = torch.optim.AdamW(
+                self.ac.parameters(),
+                lr = self.learning_config['learning_rate'],
+                weight_decay = self.learning_config['weight_decay']
+            )
 
     def action_step(self, X):
         self.ac.eval()
@@ -585,13 +604,14 @@ class PPOAEAgent(Agent):
         mask2 = mask[:, :-1, None, None, None].float()
         if bool(self.learning_config['predict_this_frame']):
             # If we're reconstructing the current frame (rather than next frame)
-            rec_tgt = data['obs']['pov'][:, :-1, ...].float()/255.0
+            rec_tgt = data['obs']['pov'][:, :-1, ...]
         else:
-            rec_tgt = data['obs']['pov'][:, 1:, ...].float()/255.0
+            rec_tgt = data['obs']['pov'][:, 1:, ...]
+
         if self.learning_config['reconstruction_loss_loss'] == 'l1':
-            loss_rec = nn.functional.l1_loss(rec[:,:-1,...]*mask2, rec_tgt*mask2)/torch.mean(mask2)
+            loss_rec = nn.functional.l1_loss(rec[:,:-1,...]*mask2, rec_tgt.float()/255.0*mask2)/torch.mean(mask2)
         else:
-            rec_err = (rec_tgt - rec[:,:-1,...])
+            rec_err = (rec_tgt.float()/255.0 - rec[:,:-1,...])
             loss_rec = (torch.mean( (rec_err * mask2)**2.0 )/torch.mean(mask2))**0.5
 
 
@@ -731,6 +751,8 @@ class PPOAEAgent(Agent):
                       critic_loss * self.learning_config['value_loss_coef'] + 
                       reconstruction_loss * self.learning_config['reconstruction_loss_coef']
                     ).backward()
+
+                    nn.utils.clip_grad_norm_(self.ac.lstm.parameters(), self.learning_config['lstm_grad_clip'])
 
                     self.optimizer.step()
 
