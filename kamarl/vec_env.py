@@ -1,12 +1,12 @@
 import numpy as np
 from multiprocessing import Process, Pipe
 import gym
-from .utils import Collater
+from .utils import Collater, get_slices
 import cloudpickle
 
 
 class MultiParallelWrapper(gym.Wrapper):
-    def __init__(self, env, n_envs, env_chunk_size = None):
+    def __init__(self, env, n_envs, n_chunks = None):
         if not hasattr(env, 'reward_range'):
             env.reward_range = None
         if not hasattr(env, 'metadata'):
@@ -15,14 +15,16 @@ class MultiParallelWrapper(gym.Wrapper):
 
         self.action_collater = Collater(env.action_space)
         self.obs_collater = Collater(env.observation_space)
-        self.env_chunk_size = env_chunk_size
         self.n_envs = n_envs
+        self.n_chunks = n_chunks
+
+        self.slices = get_slices(self.n_envs, self.n_chunks)
+        
 
     def fix_obs(self, obs):
-        if self.env_chunk_size is not None:
+        if self.n_chunks is not None:
             obs = [x for o in obs for x in o]
         return self.obs_collater.collate(obs)
-        # return [self.obs_collater.collate(o) for o in obs]
         
     def render(self, which=0, **kwargs):
         if hasattr(self.env, 'remotes'): # if env is a subprocvecenv, without importing that class
@@ -36,10 +38,14 @@ class MultiParallelWrapper(gym.Wrapper):
     def fix_action(self, action):
         # Input has dimensions of (n_agents, n_parallel_envs). Transpose to (n_parallel_envs, n_agents.)
         tmp = self.action_collater.decollate(action, n_chunks=self.n_envs)
-        return [(tmp[self.env_chunk_size*k:self.env_chunk_size*(k+1)]) for k in range(self.n_envs//self.env_chunk_size)]
+        return [tmp[slc] for slc in self.slices]
+        # ret_ = [tmp[self.env_chunk_size*k:self.env_chunk_size*(k+1)] for k in range(self.n_chunks)]
+        # for sp_no, k in enumerate(range(self.env_chunk_size * self.n_chunks, self.n_envs)):
+        #     ret_[sp_no].append(tmp[k])
+        # return ret_
 
     def fix_scalar(self, item):
-        if self.env_chunk_size is not None:
+        if self.n_chunks is not None:
             ret = np.array([x for o in item for x in o])
         else:
             ret = np.array(item)
@@ -47,6 +53,8 @@ class MultiParallelWrapper(gym.Wrapper):
 
     def step(self, action):
         obs, rew, done, meta = self.env.step(self.fix_action(action))
+        if np.prod(self.fix_scalar(action).shape) != np.prod(self.fix_scalar(rew).shape):
+            import pdb; pdb.set_trace()
         return self.fix_obs(obs), self.fix_scalar(rew), self.fix_scalar(done), meta
     
     def reset(self, **kwargs):
@@ -54,15 +62,14 @@ class MultiParallelWrapper(gym.Wrapper):
 
 
 def stack_environments(env_fns, n_subprocs):
-    if len(env_fns) % n_subprocs != 0:
-        raise ValueError("number of environments should be divisible by number of subprocesses.")
-    chunksize = len(env_fns)//n_subprocs
-
+    chunk_slices = get_slices(len(env_fns), n_subprocs)
     def get_hooks(k):
-        return lambda: EnvStack(env_fns[chunksize*k:chunksize*(k+1)])
-    env_fns_ = [get_hooks(k) for k in range(n_subprocs)]
-
-    return MultiParallelWrapper(SubprocEnvStack(env_fns_), n_envs = len(env_fns), env_chunk_size=chunksize)
+        return lambda: EnvStack(env_fns[chunk_slices[k]])
+    return MultiParallelWrapper(
+        SubprocEnvStack(env_fns = [get_hooks(k) for k in range(n_subprocs)]), 
+        n_envs = len(env_fns),
+        n_chunks = n_subprocs
+    )
 
 
 class EnvStack:
@@ -74,6 +81,9 @@ class EnvStack:
         self.action_space = self.envs[0].action_space
 
     def step(self, actions):
+        if len(self.envs) != len(actions):
+            print("Action length inconsistency")
+            # import pdb; pdb.set_trace()
         return list(zip(*[env.step(action) for env, action in zip(self.envs, actions)]))
 
     def render(self, *args, which=0, **kwargs):
@@ -193,4 +203,10 @@ class SubprocEnvStack:
     def step(self, actions):
 
         self.step_async(actions)
-        return self.step_wait()
+        ret = self.step_wait()
+
+        if not all([len(a)==len(b) for a,b in zip(actions, ret[0])]):
+            import pdb; pdb.set_trace()
+        else:
+            return ret
+

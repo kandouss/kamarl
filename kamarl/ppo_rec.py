@@ -51,6 +51,7 @@ class PPOLSTM(nn.Module):
         'fancy_init': True,
         'conv_nonlinearity': 'relu',
         'norm': False,
+        'no_tanh': False,
     }
     
 
@@ -99,16 +100,20 @@ class PPOLSTM(nn.Module):
                 if self.config['norm']:
                     conv_layers.append(nn.BatchNorm2d(num_features=in_channels))
 
+        if self.config['no_tanh']:
+            tanh = nn.LeakyReLU
+        else:
+            tanh = nn.Tanh
+
         self.conv_layers = ConvNet(
             *conv_layers,
             input_shape=input_image_shape,
-            output_nonlinearity=nn.Tanh,
+            output_nonlinearity=tanh,
         )
-
         self.combined_input_layers = make_mlp(
             [self.conv_layers.n + n_flat_inputs, *self.config['input_trunk_layers']],
             nonlinearity=nlin_hook,
-            output_nonlinearity=nn.Tanh)
+            output_nonlinearity=tanh)
         
         tmp = [x.out_features for x in self.combined_input_layers if hasattr(x, 'out_features')]
         if len(tmp) == 0:
@@ -146,13 +151,13 @@ class PPOLSTM(nn.Module):
         )
         self.mlp_val = make_mlp(
             layer_sizes=[self.lstm.hidden_size, *self.config['val_mlp_layers'], 1],
-            nonlinearity=nn.Tanh,
+            nonlinearity=tanh,
             output_nonlinearity=None
         )
 
         self.mlp_pi = make_mlp(
             layer_sizes=[self.lstm.hidden_size, *self.config['pi_mlp_layers'], action_space.n],
-            nonlinearity=nn.Tanh,
+            nonlinearity=tanh,
             output_nonlinearity=None
         )
 
@@ -174,7 +179,10 @@ class PPOLSTM(nn.Module):
         if isinstance(self.observation_space, gym.spaces.Box):
             return (X,torch.tensor((), device=device_of(self)))
         elif isinstance(self.observation_space, gym.spaces.Dict):
-            batch_dims = X['pov'].shape[:-3] # dumb hack.
+            try:
+                batch_dims = X['pov'].shape[:-3] # dumb hack.
+            except:
+                import pdb; pdb.set_trace()
             def expand_dims(X):
                 while len(X.shape) < len(batch_dims) + 1:
                     X = X[..., None]
@@ -291,6 +299,8 @@ class PPOAEAgent(Agent):
 
             'predict_this_frame': False,
 
+            'track_gradients': False,
+
             'save_test_image': None,
             'lstm_train_hidden_dropout': 0.0,
             'lstm_train_input_dropout': 0.0,
@@ -322,7 +332,9 @@ class PPOAEAgent(Agent):
 
         self.model_config = self.ac.config
         
-        # self.track_gradients(self.ac)
+        if self.learning_config['track_gradients']:
+            self.track_gradients(self.ac)#.lstm)
+
         self.training = True
 
         self.replay_memory_array_specs = {
@@ -358,6 +370,7 @@ class PPOAEAgent(Agent):
             'metadata': self.metadata,
             'learning_config': self.learning_config,
             'n_updates': self.counts['updates'],
+            'n_gradient_updates': self.counts['gradient_updates'],
             'n_episodes': self.counts['episodes']
         }]
 
@@ -371,10 +384,14 @@ class PPOAEAgent(Agent):
         }
 
     def reset_info(self):
-        self.logged_lengths = []
-        self.logged_rewards = []
-        self.logged_streaks = []
-        self.logged_reward_counts = []
+        self.ep_stats = {
+            'lengths': [],
+            'rewards': [],
+            'streaks': [],
+            'reward_counts': [],
+            'reward_streaks': []
+        }
+        self.ep_stats_hist = copy.deepcopy(self.ep_stats)
 
     def reset_state(self):
         self.state = {
@@ -467,11 +484,23 @@ class PPOAEAgent(Agent):
         still_going = ~np.array(done).astype(bool)
         rew_ = np.array(rew)*still_going
         min_streak_rew = 1.0
-        self.episode_reward_streaks = (self.episode_reward_streaks + (rew_ >= min_streak_rew))*(rew_ >= 0)
-        self.logged_reward_counts[-1] += (rew_>=min_streak_rew)
-        self.logged_streaks[-1] = np.maximum(self.episode_reward_streaks, self.logged_streaks[-1])
-        self.logged_rewards[-1] += rew*still_going
-        self.logged_lengths[-1] += still_going
+        
+        # self.episode_reward_streaks = (self.episode_reward_streaks + (rew_ >= min_streak_rew))*(rew_ >= 0)
+
+        # self.logged_reward_counts[-1] += (rew_>=min_streak_rew)
+        # self.logged_streaks[-1] = np.maximum(self.episode_reward_streaks, self.logged_streaks[-1])
+        # self.logged_rewards[-1] += rew*still_going
+        # self.logged_lengths[-1] += still_going
+
+        try:
+            self.ep_stats['reward_streaks'] = (self.ep_stats['reward_streaks'] + (rew_ >= min_streak_rew))*(rew_ >= 0)
+            self.ep_stats['reward_counts'] += (rew_>=min_streak_rew) 
+            self.ep_stats['streaks'] = np.maximum(self.ep_stats['streaks'], self.ep_stats['reward_streaks'])
+            self.ep_stats['rewards'] += rew * still_going
+            self.ep_stats['lengths'] += still_going
+        except:
+            import pdb; pdb.set_trace()
+
 
         if self.training:
             save_dict = {
@@ -657,31 +686,39 @@ class PPOAEAgent(Agent):
                 
 
     def optimize(self):
+        # self.ep_stats_hist['reward_counts']
+        # self.logged_streaks = np.concatenate(self.logged_streaks)
+        # self.logged_rewards = np.concatenate(self.logged_rewards)
+        # self.logged_lengths = np.concatenate(self.logged_lengths)
+        # self.logged_reward_counts = np.concatenate(self.logged_reward_counts)
+        info = self.ep_stats_hist
         log_data = {
             'update_no': self.counts['updates'],
             'ep_no': self.counts['episodes'],
             'step_no': self.counts['steps'],
 
-            'mean_reward_streak': np.mean(self.logged_streaks),
-            'max_reward_streak': np.max(self.logged_streaks),
-            'reward_streak_15p': np.quantile(self.logged_streaks, 0.15),
-            'reward_streak_85p': np.quantile(self.logged_streaks, 0.85),
+            'gradient_update_no': self.counts['gradient_updates'],
 
-            'mean_reward': np.mean(self.logged_rewards),
-            'ep_return_mean': np.mean(self.logged_rewards),
-            'ep_return_15p': np.quantile(self.logged_rewards, 0.15),
-            'ep_return_85p': np.quantile(self.logged_rewards, 0.85),
-            'ep_return_std': np.std(self.logged_rewards),
-            'ep_return_min': np.min(self.logged_rewards),
-            'ep_return_max': np.max(self.logged_rewards),
+            'mean_reward_streak': np.mean(info['streaks']),
+            'max_reward_streak': np.max(info['streaks']),
+            'reward_streak_15p': np.quantile(info['streaks'], 0.15),
+            'reward_streak_85p': np.quantile(info['streaks'], 0.85),
 
-            'mean_length': np.mean(self.logged_lengths),
+            'mean_reward': np.mean(info['rewards']),
+            'ep_return_mean': np.mean(info['rewards']),
+            'ep_return_15p': np.quantile(info['rewards'], 0.15),
+            'ep_return_85p': np.quantile(info['rewards'], 0.85),
+            'ep_return_std': np.std(info['rewards']),
+            'ep_return_min': np.min(info['rewards']),
+            'ep_return_max': np.max(info['rewards']),
 
-            'mean_reward_counts': np.mean(self.logged_reward_counts),
-            'reward_counts_15p': np.quantile(self.logged_reward_counts, 0.15),
-            'reward_counts_85p': np.quantile(self.logged_reward_counts, 0.85),
+            'mean_length': np.mean(info['lengths']),
 
-            'mean_streak_fraction': np.mean(np.array(self.logged_streaks)/np.array(self.logged_reward_counts).clip(1)),
+            'mean_reward_counts': np.mean(info['reward_counts']),
+            'reward_counts_15p': np.quantile(info['reward_counts'], 0.15),
+            'reward_counts_85p': np.quantile(info['reward_counts'], 0.85),
+
+            'mean_streak_fraction': np.mean(np.array(info['streaks'])/np.array(info['reward_counts']).clip(1)),
         }
         self.reset_info()
 
@@ -695,6 +732,7 @@ class PPOAEAgent(Agent):
             policy_losses = []
             entropy_losses = []
             reconstruction_losses = []
+            lstm_gradient_clip_counts = []
 
             n_hidden_updates = 0
 
@@ -704,100 +742,116 @@ class PPOAEAgent(Agent):
             self.normalize_advantages()
             self.ac.train()
 
-            for episode in self.replay_memory.episodes:
-                episode.to_tensor(device=device)
-
             n_minibatches = 0
-            for i in range(hp['num_minibatches']):
+            if not (hp['num_minibatches'] > 0):
+                kl_after = 0
+                used_backup = False
+            else:
+                for episode in self.replay_memory.episodes:
+                    episode.to_tensor(device=device)
 
-                # If it's time, recompute the advantages and hidden states in the replay buffer to make sure
-                # they don't get too stale.
-                hid_up_in = hp["hidden_update_interval"]
-                if (hid_up_in is not None) and (i%hid_up_in == 0) and (i > 0):
-                    n_hidden_updates += 1
-                    self.refresh_stale(self.replay_memory.episodes, parallel=hp['hidden_update_n_parallel'])
-                    self.normalize_advantages()
+                for i in range(hp['num_minibatches']):
 
-                
-                # Back up the network parameters and the optimizer state after the minimum number of minibatches.
-                # If the policy later drifts too far, this backup will be used to undo the subsequent gradient 
-                # updates that led to the policy diverging.
-                if i == hp['min_num_minibatches']:
-                    backup_i = i
-                    backup_weights = self.ac.state_dict()
-                    backup_opt_state = self.optimizer.state_dict()
-                    # Note: if min_num_minibatches isn't a multiple of hidden_update_interval,
-                    # the kl estimate saved below might be a bit stale.
-                    backup_kl_check = self.check_kl(self.ac, self.sample_replay_buffer(batch_size=512, seq_len=8))
+                    # If it's time, recompute the advantages and hidden states in the replay buffer to make sure
+                    # they don't get too stale.
+                    hid_up_in = hp["hidden_update_interval"]
+                    if (hid_up_in is not None) and (i%hid_up_in == 0) and (i > 0):
+                        n_hidden_updates += 1
+                        self.refresh_stale(self.replay_memory.episodes, parallel=hp['hidden_update_n_parallel'])
+                        self.normalize_advantages()
 
-                # Sample a minibatch of data with which to compute losses/update parameters.
-                minibatch_data = self.sample_replay_buffer(batch_size=hp["minibatch_size"], seq_len=hp["minibatch_seq_len"])
-
-                # Apply dropout to LSTM "hx" (but not "cx")
-                nn.functional.dropout(minibatch_data['hx_cx'][0,...], p=hp['lstm_train_hidden_dropout'], inplace=True)
-
-                with torch.set_grad_enabled(True):
-                    self.optimizer.zero_grad()
-
-                    # loss_pi, loss_val, loss_ent, loss_rec, pi_info
-                    policy_loss, critic_loss, entropy_loss, reconstruction_loss, loss_metrics = self.compute_loss(minibatch_data)
-
-                    # If est_kl(current_policy, policy_at_start_of_updates) have diverged, then stop updating parameters.
-                    if i>hp['min_num_minibatches'] and loss_metrics['kl'] > 1.5 * hp['kl_target']:
-                        break
-
-                    ( policy_loss * self.learning_config['policy_loss_coef'] +
-                      entropy_loss * self.learning_config['entropy_bonus_coef'] * self.learning_config['policy_loss_coef'] +
-                      critic_loss * self.learning_config['value_loss_coef'] + 
-                      reconstruction_loss * self.learning_config['reconstruction_loss_coef']
-                    ).backward()
-
-                    nn.utils.clip_grad_norm_(self.ac.lstm.parameters(), self.learning_config['lstm_grad_clip'])
-
-                    self.optimizer.step()
-
-                # This will be the estimated kl from the last minibatch before potential early termination.
-                final_minibatch_kl = loss_metrics['kl']
-
-                # Save metrics.
-                pi_infos.append({k:v for k,v in loss_metrics.items() if k != 'sample_prediction'})
-                critic_losses.append(critic_loss.detach().cpu().numpy())
-                policy_losses.append(policy_loss.detach().cpu().numpy())
-                entropy_losses.append(entropy_loss.detach().cpu().numpy())
-                reconstruction_losses.append(reconstruction_loss.detach().cpu().numpy())
-
-                # Number of minibatch iterations/gradient updates that actually took place.
-                n_minibatches += 1
-
-            if hp['save_test_image'] is not None:
-                an_image = (loss_metrics['sample_prediction'].detach().cpu().numpy()*255).clip(0,255).astype(np.uint8)
-                print("About an image: ", an_image.mean(), an_image.min(), an_image.max())
-                Image.fromarray(an_image).save(hp['save_test_image'])
-
-            # After the minibatch updates are finished, do a final check to make sure the policy hasn't diverged too much.
-            # If it has, then reset the actor, critic, and optimizer parameters to the backup values saved above.
-            used_backup = False
-            if hp['kl_hard_limit'] is not None:
-                self.refresh_stale(self.replay_memory.episodes)
-                kl_after = self.check_kl(self.ac, self.sample_replay_buffer(batch_size=512, seq_len=8))
-
-                if kl_after > hp['kl_hard_limit']:
-                    used_backup = True
-                    self.ac.load_state_dict(backup_weights)
-                    self.optimizer.load_state_dict(backup_opt_state)
                     
-                    kl_after = backup_kl_check
-                    n_minibatches = backup_i
+                    # Back up the network parameters and the optimizer state after the minimum number of minibatches.
+                    # If the policy later drifts too far, this backup will be used to undo the subsequent gradient 
+                    # updates that led to the policy diverging.
+                    if i == hp['min_num_minibatches']:
+                        backup_i = i
+                        backup_weights = self.ac.state_dict()
+                        backup_opt_state = self.optimizer.state_dict()
+                        # Note: if min_num_minibatches isn't a multiple of hidden_update_interval,
+                        # the kl estimate saved below might be a bit stale.
+                        backup_kl_check = self.check_kl(self.ac, self.sample_replay_buffer(batch_size=512, seq_len=8))
+
+                    # Sample a minibatch of data with which to compute losses/update parameters.
+                    minibatch_data = self.sample_replay_buffer(batch_size=hp["minibatch_size"], seq_len=hp["minibatch_seq_len"])
+
+                    # Apply dropout to LSTM "hx" (but not "cx")
+                    nn.functional.dropout(minibatch_data['hx_cx'][0,...], p=hp['lstm_train_hidden_dropout'], inplace=True)
+
+                    if self.learning_config['track_gradients']:
+                        self.should_log_gradients = (i==0)
+
+                    with torch.set_grad_enabled(True):
+                        self.optimizer.zero_grad()
+
+                        # loss_pi, loss_val, loss_ent, loss_rec, pi_info
+                        policy_loss, critic_loss, entropy_loss, reconstruction_loss, loss_metrics = self.compute_loss(minibatch_data)
+
+                        # If est_kl(current_policy, policy_at_start_of_updates) have diverged, then stop updating parameters.
+                        if i>hp['min_num_minibatches'] and loss_metrics['kl'] > 1.5 * hp['kl_target']:
+                            break
+
+                        ( policy_loss * self.learning_config['policy_loss_coef'] +
+                        entropy_loss * self.learning_config['entropy_bonus_coef'] * self.learning_config['policy_loss_coef'] +
+                        critic_loss * self.learning_config['value_loss_coef'] + 
+                        reconstruction_loss * self.learning_config['reconstruction_loss_coef']
+                        ).backward()
+
+                        lstm_gradient_clip_count = sum(
+                            ((x.detach()**2>self.learning_config['lstm_grad_clip']).sum()
+                            for x in self.ac.lstm.parameters())
+                        )
+
+                        nn.utils.clip_grad_norm_(self.ac.lstm.parameters(), self.learning_config['lstm_grad_clip'])
+
+                        self.optimizer.step()
+
+                    # This will be the estimated kl from the last minibatch before potential early termination.
+                    final_minibatch_kl = loss_metrics['kl']
+
+                    # Save metrics.
+                    pi_infos.append({k:v for k,v in loss_metrics.items() if k != 'sample_prediction'})
+                    critic_losses.append(critic_loss.detach().cpu().numpy())
+                    policy_losses.append(policy_loss.detach().cpu().numpy())
+                    entropy_losses.append(entropy_loss.detach().cpu().numpy())
+                    reconstruction_losses.append(reconstruction_loss.detach().cpu().numpy())
+                    lstm_gradient_clip_counts.append(lstm_gradient_clip_count.detach().cpu().numpy())
+
+                    # Number of minibatch iterations/gradient updates that actually took place.
+                    n_minibatches += 1
+                    self.counts['gradient_updates'] += 1
+
+                if hp['save_test_image'] is not None:
+                    an_image = (loss_metrics['sample_prediction'].detach().cpu().numpy()*255).clip(0,255).astype(np.uint8)
+                    print("About an image: ", an_image.mean(), an_image.min(), an_image.max())
+                    Image.fromarray(an_image).save(hp['save_test_image'])
+
+                # After the minibatch updates are finished, do a final check to make sure the policy hasn't diverged too much.
+                # If it has, then reset the actor, critic, and optimizer parameters to the backup values saved above.
+                used_backup = False
+                if hp['kl_hard_limit'] is not None:
+                    self.refresh_stale(self.replay_memory.episodes)
+                    kl_after = self.check_kl(self.ac, self.sample_replay_buffer(batch_size=512, seq_len=8))
+
+                    if kl_after > hp['kl_hard_limit']:
+                        used_backup = True
+                        self.ac.load_state_dict(backup_weights)
+                        self.optimizer.load_state_dict(backup_opt_state)
+                        
+                        kl_after = backup_kl_check
+                        n_minibatches = backup_i
 
 
             policy_losses = policy_losses[:n_minibatches]
             critic_losses = critic_losses[:n_minibatches]
             entropy_losses = entropy_losses[:n_minibatches]
             reconstruction_losses = reconstruction_losses[:n_minibatches]
+            lstm_gradient_clip_counts = lstm_gradient_clip_counts[:n_minibatches]
             pi_infos = pi_infos[:n_minibatches]
 
-
             mean = lambda vals: np.nan if len(vals) == 0 else np.nanmean(vals) if not isinstance(vals[0], torch.Tensor) else torch.tensor(vals).mean().cpu().item()
+            get_first = lambda vals: vals[0] if len(vals) > 0 else np.nan
+            get_last = lambda vals: vals[-1] if len(vals) > 0 else np.nan
 
             steps = np.array([len(e) for e in self.replay_memory.episodes])
             mean_val = mean([e.val.mean() for e in self.replay_memory.episodes])
@@ -813,12 +867,30 @@ class PPOAEAgent(Agent):
                 'mean_entropy_loss': mean(entropy_losses),
                 'mean_val': mean_val,
                 'mean_pi_clip_frac': mean_clip_frac,
+                'total_lstm_gradient_clip_count': np.nansum(lstm_gradient_clip_counts),
                 'n_hidden_updates': n_hidden_updates,
                 'kl_final_minibatch': final_minibatch_kl,
                 'kl_final': kl_after,
                 'used_backup': 1*used_backup,
+
+                'critic_loss_first': get_first(critic_losses),
+                'critic_loss_last': get_last(critic_losses),
+
+                'policy_loss_first': get_first(policy_losses),
+                'policy_loss_last': get_last(policy_losses),
+
+                'rec_loss_first': get_first(reconstruction_losses),
+                'rec_loss_last': get_last(reconstruction_losses),
+
+                'ent_loss_first': get_first(entropy_losses),
+                'ent_loss_last': get_last(entropy_losses),
+
                 'update_time_s': opt_end_time - opt_start_time
             }
+
+
+            if self.learning_config['track_gradients']:
+                log_data['gradients'] = self._grad_stats
                 
 
             print(f"Update {1+self.counts['updates']}: {n_minibatches} iters, {n_hidden_updates} hidden updates.")
@@ -847,11 +919,13 @@ class PPOAEAgent(Agent):
         self.reset_state()
 
         
-        self.episode_reward_streaks = np.zeros(n_parallel) 
-        self.logged_reward_counts.append(np.zeros(n_parallel))
-        self.logged_rewards.append(np.zeros(n_parallel))
-        self.logged_lengths.append(np.zeros(n_parallel))
-        self.logged_streaks.append(np.zeros(n_parallel))
+        for k in self.ep_stats.keys():
+            self.ep_stats[k] = np.zeros(n_parallel)
+        # self.episode_reward_streaks = np.zeros(n_parallel) 
+        # self.logged_reward_counts.append(np.zeros(n_parallel))
+        # self.logged_rewards.append(np.zeros(n_parallel))
+        # self.logged_lengths.append(np.zeros(n_parallel))
+        # self.logged_streaks.append(np.zeros(n_parallel))
 
         # self.reset_info()
         self.last_val = None
@@ -861,32 +935,63 @@ class PPOAEAgent(Agent):
                 self.replay_memory.get_new_episode() for x in 
                 range(1 if self.n_parallel is None else self.n_parallel)
             ]
+        else:
+            self.active_episodes = []
 
 
         self.was_active = True
         self.counts['episode_steps'] = 0
 
     def end_episode(self, log=False):
-        episode_reward = sum(e.rew for e in self.active_episodes)
+        
         if bool(log):
+            info = self.ep_stats
             self.log(
                 'episode_data',
                 {
                     'ep_no': self.counts['episodes'],
-                    'ep_len': np.mean([len(e) for e in self.active_episodes]),
-                    'total_reward': episode_reward,
-                },
+                    'update_no': self.counts['updates'],
+                    'step_no': self.counts['steps'],
+
+                    'mean_reward_streak': np.mean(info['streaks']),
+                    'max_reward_streak': np.max(info['streaks']),
+                    'reward_streak_15p': np.quantile(info['streaks'], 0.15),
+                    'reward_streak_85p': np.quantile(info['streaks'], 0.85),
+
+                    'mean_reward': np.mean(info['rewards']),
+                    'ep_return_mean': np.mean(info['rewards']),
+                    'ep_return_15p': np.quantile(info['rewards'], 0.15),
+                    'ep_return_85p': np.quantile(info['rewards'], 0.85),
+                    'ep_return_std': np.std(info['rewards']),
+                    'ep_return_min': np.min(info['rewards']),
+                    'ep_return_max': np.max(info['rewards']),
+
+                    'mean_length': np.mean(info['lengths']),
+
+                    'mean_reward_counts': np.mean(info['reward_counts']),
+                    'reward_counts_15p': np.quantile(info['reward_counts'], 0.15),
+                    'reward_counts_85p': np.quantile(info['reward_counts'], 0.85),
+
+                    'mean_streak_fraction': np.mean(np.array(info['streaks'])/np.array(info['reward_counts']).clip(1)),
+                }
             )
 
-        for ep in self.active_episodes:
-            ep.freeze()
-            self.calculate_advantages(ep)
-            self.replay_memory.add_episode(ep)
+        if self.training:        
+            self.counts['episodes'] += len(self.active_episodes)
+            for ep in self.active_episodes:
+                ep.freeze()
+                self.calculate_advantages(ep)
+                self.replay_memory.add_episode(ep)
+        else:
+            self.counts['episodes'] += 1 if self.n_parallel is None else self.n_parallel
 
-        self.counts['episodes'] += len(self.active_episodes)
+            
+
+        for k in self.ep_stats.keys():
+            self.ep_stats_hist[k] = np.append(self.ep_stats_hist[k], self.ep_stats[k])
+            self.ep_stats[k] = []
+            
 
         if len(self.replay_memory.episodes) >= self.learning_config['batch_size']:
             self.optimize()
             self.last_update_episode = self.counts['episodes']
-
-        self.grad_log_sync()

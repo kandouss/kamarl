@@ -198,7 +198,6 @@ class PPOAgent(Agent):
             'num_minibatches': 10,
             'min_num_minibatches': 1,
             "max_episode_length": 1000,
-            "batch_size": 25, # episodes
             "hidden_update_interval": 5, # minibatches!
             "hidden_update_n_parallel": 32,
             "minibatch_size": 256,
@@ -228,7 +227,7 @@ class PPOAgent(Agent):
 
         self.learning_config, novel_keys = update_config_dict(self.default_learning_config, learning_config)
         if len(novel_keys) > 0:
-            warnings.warn(f"Specified unknown keys in {self.__class__.__name__} learning config: ", novel_keys)
+            warnings.warn(f"Specified unknown keys in {self.__class__.__name__} learning config: {novel_keys}")
         
         self.ac = PPOLSTM(self.observation_space, self.action_space, config=model_config)
         self.ac_backup = copy.deepcopy(self.ac)

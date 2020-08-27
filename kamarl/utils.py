@@ -105,10 +105,22 @@ def get_module_inputs(observation_space):
 def combine_spaces(spaces):
     return gym.spaces.Tuple(spaces)
 
+def get_slices(n_total, n_chunks):
+    lens = [0 for _ in range(n_chunks)]
+    for k in range(n_total):
+        lens[k%n_chunks] += 1
+    slices = []
+    count = 0
+    for chunk_len in lens:
+        slices.append(slice(count, count+chunk_len))
+        count += chunk_len
+    return slices
+
 class Collater:
     def __init__(self, space):
         self.space = space
         self.spacelist = self.find_spaces(space)
+        self.slice_cache = {}
 
     @classmethod
     def find_spaces(cls, space, keys=tuple()):
@@ -149,7 +161,18 @@ class Collater:
                 import pdb; pdb.set_trace()
         return out
 
+    def get_slices(self, n_total, n_chunks):
+        if n_chunks is None:
+            return None
+        if (n_total, n_chunks) in self.slice_cache:
+            return self.slice_cache[(n_total, n_chunks)]
+        else:
+            ret = get_slices(n_total, n_chunks)
+            self.slice_cache[(n_total, n_chunks)] = ret
+            return ret
+
     def decollate(self, items, n_chunks):
+        slices = None
         collated_output = [self.new_empty() for _ in range(n_chunks)]
         for addr, _ in self.spacelist:
             out_ptrs = collated_output
@@ -162,7 +185,7 @@ class Collater:
             src_vals = src_ptr[addr[-1]]
             chunksize = len(src_vals)//n_chunks
             
-            for chunk_no, out_ptr in enumerate(out_ptrs):
-                out_ptr[addr[-1]] = src_vals[chunk_no*chunksize:(chunk_no+1)*chunksize]
-        
+            for out_ptr, slc in zip(out_ptrs, self.get_slices(len(src_vals), n_chunks)):
+                out_ptr[addr[-1]] = src_vals[slc]
+
         return collated_output

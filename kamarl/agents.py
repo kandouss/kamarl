@@ -6,6 +6,7 @@ import types
 import gym
 from abc import ABC, abstractmethod, abstractproperty
 from contextlib import contextmanager
+import copy
 import warnings
 from io import BytesIO, TextIOWrapper
 import tempfile
@@ -16,13 +17,15 @@ from urllib.parse import urlparse
 import boto3
 
 from marlgrid.agents import GridAgentInterface
-
+import kamarl
 from kamarl.utils import (
     space_to_dict,
     dict_to_space,
     combine_spaces,
     update_config
 )
+# from kamarl.ppo_rec import PPOAEAgent
+# from kamarl.ppo import PPOAgent
 
 def parse_s3_uri( s3_uri):
     o = urlparse(s3_uri,  allow_fragments=False)
@@ -76,6 +79,9 @@ class Agent(RLAgentBase):
         self.updates_since_history_update = 0
         self.counts = defaultdict(int)
 
+        self.should_log_gradients = False
+        self._grad_stats = {}
+
     @property
     def _save_state(self):
         return {
@@ -100,39 +106,33 @@ class Agent(RLAgentBase):
             'learning_config': self.learning_config,
         }]
 
-    def track_gradients(self, module, log_frequency=10):
+    def track_gradients(self, module):
         # Weights and biases v. 0.8.32? was crashing when Kamal tried to log gradients using
         # the built-in pytorch hooks and `wandb.watch`. This does a similar thing in a similar
         # way but without crashing.
-        self._grad_stats = getattr(self, '_grad_stats', {})
-        self._grad_counts = getattr(self, '_grad_counts', {})
-        self._grads_updated = False
-        
         def monitor_gradient_hook(log_name):
             def log_gradient(grad):
                 p_ = lambda x: x.detach().cpu().item()
-                update_count = self._grad_counts.get(log_name, 0)
-                if update_count%log_frequency==0:
+                if self.should_log_gradients:
                     self._grad_stats = {
                         **self._grad_stats,
                         f'{log_name}_mean': p_(grad.mean()),
+                        f'{log_name}_l1': p_(grad.abs().mean()),
+                        f'{log_name}_l2': p_(((grad**2).mean())**0.5),
                         f'{log_name}_min': p_(grad.min()),
                         f'{log_name}_max': p_(grad.max()),
                         f'{log_name}_std': p_(grad.std()),
                     }
-                    self._grads_updated = True
-                self._grad_counts[log_name] = update_count + 1
             return log_gradient
-
 
         for k, (name, w) in enumerate(module.named_parameters()):
             w.register_hook(monitor_gradient_hook(name))
 
-    def grad_log_sync(self):
-        if hasattr(self, '_grad_stats'):
-            self.log('gradient_info', self._grad_stats)
-            self._grad_stats = {}
-            self._grads_updated = False
+    # def grad_log_sync(self):
+    #     if hasattr(self, '_grad_stats'):
+    #         self.log('gradients', self._grad_stats)
+    #         self._grad_stats = {}
+    #         self._grads_updated = False
 
     def set_logger(self, logger):
         self.logger = logger
@@ -217,6 +217,82 @@ class Agent(RLAgentBase):
         json.dump(self._save_state, open(metadata_path, "w"))
 
     @classmethod
+    def get_class_to_load(cls, metadata):
+        print(f"LAODING {cls}")
+        return cls
+        # return kamarl.PPOAEAgent
+        # if metadata['class'] != cls.__name__:
+        #     warning_text = f"Attempting to load a {cls.__name__} from a {metadata['class']} checkpoint."
+        #     if metadata['class']=='PPOAgent':
+        #         target_class = kamarl.PPOAgent
+        #     elif metadata['class']=='PPOAEAgent':
+        #         target_class = kamarl.PPOAEAgent
+        #     else:
+        #         err_msg = f"Not sure how to load an agent with class {metadata['class']}"
+        #         raise ValueError(err_msg)
+        #     warning_text += f" --> Using {target_class.__name__} instead."
+        #     warnings.warn(warning_text)
+        # else:
+        #     target_class = cls
+        # return target_class
+
+    @staticmethod
+    def partial_load_state_dict(mod_state, state_dict):
+        # mod_state = module.state_dict()
+        for name, param in state_dict.items():
+            if name not in mod_state:
+                continue
+            if isinstance(param, torch.nn.Parameter):
+                # backwards compatibility for serialized parameters
+                param = param.data
+            elif isinstance(param, dict):
+                if name not in mod_state:
+                    mod_state[name] = copy.deepcopy(param)
+                else:
+                    mod_state[name] = Agent.partial_load_state_dict(mod_state.get(name, {}), param)
+            else:
+                try:
+                    mod_state[name].copy_(param)
+                except:
+                    raise ValueError(f"Couldn't load param {name} \n>from state\n {mod_state[name]}\n >to\n {param}")
+
+    @classmethod
+    def _load(cls, metadata, model_path, device=None):
+        target_class = cls.get_class_to_load(metadata)
+        ret = target_class(**{k:v for k,v in metadata.items() if k != 'class'})
+
+        if device is None:
+            device = getattr(ret, 'device', None)
+
+        modules_dict = torch.load(model_path, map_location=device)
+
+        for k,v in modules_dict.items():
+            # v = cls.fill_in_modules(v, getattr(ret, k).state_dict())
+            if k == 'optimizer' and metadata['class'] != cls.__name__:
+                print(f"Changed model class from {metadata['class']} to {cls.__name__}. Gonna not load optimizer.")
+                continue
+            try:
+                getattr(ret, k).load_state_dict(v.state_dict())
+            except:
+                try:
+                    cls.partial_load_state_dict(getattr(ret, k).state_dict(), v.state_dict())
+                except:
+                    if k == 'optimizer':
+                        warnings.warn("Failed to load optimizer.")
+                    continue
+            # try:
+            #     cls.partial_load_state_dict(getattr(ret, k).state_dict(), v.state_dict())
+            #     # getattr(ret, k).load_state_dict(v.state_dict())
+            # except:
+            #     rsd = getattr(ret, k).state_dict()
+            #     for net_name, net_params in v.state_dict().items():
+            #         print(net_name, tuple(net_params.shape), tuple(rsd[net_name].shape))
+            #     print(f"Error loading {k}")
+            #     import pdb; pdb.set_trace()
+        del modules_dict
+        return ret
+
+    @classmethod
     def load_s3(cls, save_path, config_changes = None, device=None):
         if config_changes is None:
             config_changes = {}
@@ -225,26 +301,7 @@ class Agent(RLAgentBase):
             json.load(open(get_file_from_s3(os.path.join(save_path, 'metadata.json')),'r')),
             config_changes
         )
-
-        if metadata['class'] != cls.__name__:
-            warnings.warn(f"Attempting to load a {cls.__name__} from a {metadata['class']} checkpoint.")
-        ret = cls(**{k:v for k,v in metadata.items() if k != 'class'})
-
-        if device is None:
-            device = getattr(ret, 'device', None)
-        modules_dict = torch.load(model_path, map_location=device)
-        
-        for k,v in modules_dict.items():
-            try:
-                getattr(ret, k).load_state_dict(v.state_dict())
-            except:
-                rsd = getattr(ret, k).state_dict()
-                for net_name, net_params in v.state_dict().items():
-                    print(net_name, tuple(net_params.shape), tuple(rsd[net_name].shape))
-                print(f"Error loading {k}")
-                import pdb; pdb.set_trace()
-        del modules_dict
-        return ret
+        return cls._load(metadata, model_path, device=device)
 
 
     @classmethod
@@ -258,25 +315,7 @@ class Agent(RLAgentBase):
 
         metadata = update_config(json.load(open(metadata_path,'r')), config_changes)
 
-        if metadata['class'] != cls.__name__:
-            warnings.warn(f"Attempting to load a {cls.__name__} from a {metadata['class']} checkpoint.")
-        ret = cls(**{k:v for k,v in metadata.items() if k != 'class'})
-
-        if device is None:
-            device = getattr(ret, 'device', None)
-        modules_dict = torch.load(model_path, map_location=device)
-        
-        for k,v in modules_dict.items():
-            try:
-                getattr(ret, k).load_state_dict(v.state_dict())
-            except:
-                rsd = getattr(ret, k).state_dict()
-                for net_name, net_params in v.state_dict().items():
-                    print(net_name, tuple(net_params.shape), tuple(rsd[net_name].shape))
-                print(f"Error loading {k}")
-                import pdb; pdb.set_trace()
-        del modules_dict
-        return ret
+        return self._load(metadata, model_path, device=device)
 
 
 class IndependentAgents(RLAgentBase):
@@ -304,7 +343,6 @@ class IndependentAgents(RLAgentBase):
             agent.set_device(dev)
 
     def save_step(self, obs, act, rew, done):
-        
         if np.isscalar(done):
             done = np.full(rew.shape, done, dtype='bool')
         elif np.prod(rew.shape)/np.prod(done.shape) == len(self.agents):
@@ -331,6 +369,12 @@ class IndependentAgents(RLAgentBase):
 
     def __iter__(self):
         return self.agents.__iter__()
+
+    def replace_agent(self, agent_no, new_agent):
+        self.agents[agent_no] = None
+        self.agents[agent_no] = new_agent
+        new_agent.set_logger(logger.sub_logger(f'agent_{agent_no}'))
+
 
     @contextmanager
     def episode(self):
