@@ -473,7 +473,6 @@ class PPOAEAgent(Agent):
         """ 
         Save an environment transition.
         """
-        
         def decollate(val, ix):
             if isinstance(val, dict):
                 return {k: decollate(v, ix) for k,v in val.items()}

@@ -343,6 +343,8 @@ class IndependentAgents(RLAgentBase):
             agent.set_device(dev)
 
     def save_step(self, obs, act, rew, done):
+        # print(done)
+        done = np.array(done)
         if np.isscalar(done):
             done = np.full(rew.shape, done, dtype='bool')
         elif np.prod(rew.shape)/np.prod(done.shape) == len(self.agents):

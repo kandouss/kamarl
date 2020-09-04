@@ -26,28 +26,15 @@ num_episodes = int(1e6)
 
 # Config for a cluttered multigrid
 env_config = {
-    'env_class': 'ClutteredMultiGrid',
-
-    'grid_size': 9,
-    'max_steps': 150,
-    'clutter_density': 0.2,
-    'respawn': True,
-    'ghost_mode': True,
-    'reward_decay': False, # default true.
-}
-
-# Config for a cluttered goal cycle environment
-env_config = {
-    'env_class': 'ClutteredGoalCycleEnv',
+ 
+    'env_class': 'FourRoom',
     'grid_size': 13,
-    'max_steps': 300,
-    'clutter_density': 0.2,
-    'respawn': True,
+    'max_steps': 100,
+    'clutter_density': 0.0,
+    'respawn': False,
     'ghost_mode': True,
-    'reward_decay': False, # default true.
-    'n_bonus_tiles': 3,
-    'initial_reward': True,
-    'penalty': -0.5,
+    'reward_decay': True, # default true.
+    'goal_color': 'yellow'
 }
 
 agent_interface_config = {
@@ -62,11 +49,11 @@ agent_interface_config = {
 }
 
 ppo_learning_config = {
-    "batch_size": 8,
-    'num_minibatches': 10,
-    "minibatch_size": 256,
-    "minibatch_seq_len": 8,
-    "hidden_update_interval": 10,
+    "batch_size": 20,
+    'num_minibatches': 25,
+    "minibatch_size": 64,
+    "minibatch_seq_len": 16,
+    "hidden_update_interval": None,
 
     'learning_rate': 1.e-4, # 1.e-3, #
     "kl_target":  0.01,
@@ -98,7 +85,7 @@ new_agents_info = [
     {'interface_config': copy.deepcopy(agent_interface_config), 'learning_config': copy.deepcopy(ppo_learning_config), 'model_config': copy.deepcopy(ppo_model_config)}
     for _ in range(n_new_agents)
 ]
-new_agents_info[0]['interface_config']['view_downsample_mode'] = 'mean'
+# new_agents_info[0]['interface_config']['view_downsample_mode'] = 'mean'
 grid_agents = []
 
 for agent_load_path in load_agents:
@@ -164,6 +151,7 @@ for ep_num in range(num_episodes):
             # env.render(show_agent_views=True)
             agent_total_rewards = None
             while not done:
+                old_dones = env.agents_done()
                 # Get an action for each agent.
                 # action_array = [agent.action_space.sample() for agent in agents]
 
@@ -174,7 +162,8 @@ for ep_num in range(num_episodes):
                 total_reward += reward_array.sum()
                 ep_reward += reward_array.sum()
 
-                agents.save_step(obs_array, action_array, reward_array, done_array)
+                agents.save_step(obs_array, action_array, reward_array, old_dones)
+
 
                 obs_array = next_obs_array
                 done = np.array(done_array).all()
@@ -196,6 +185,11 @@ for ep_num in range(num_episodes):
 
                 ep_steps += 1
                 total_steps += 1
+            # if ep_steps < 1000:
+            #     print(f"Stopped after {ep_steps} steps.")
+            #     tmp1 = grid_agents[0]
+            #     tmp2 = grid_agents[1]
+            #     import pdb; pdb.set_trace()
 
 
             ep_time = time.time() - ep_start_time
