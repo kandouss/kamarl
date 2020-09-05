@@ -28,8 +28,8 @@ num_episodes = int(1e6)
 env_config = {
  
     'env_class': 'FourRoom',
-    'grid_size': 13,
-    'max_steps': 100,
+    'grid_size': 9,
+    'max_steps': 1000,
     'clutter_density': 0.0,
     'respawn': False,
     'ghost_mode': True,

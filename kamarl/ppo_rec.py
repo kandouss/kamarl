@@ -507,7 +507,7 @@ class PPOAEAgent(Agent):
                 **self.state
             }
             for i, ep in enumerate(self.active_episodes):
-                if not ep['done',-1]:
+                if not ep['done',-2]: 
                     if self.n_parallel is None:
                         ep.append(save_dict)
                     else:
