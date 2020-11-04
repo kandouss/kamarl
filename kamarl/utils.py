@@ -149,16 +149,16 @@ class Collater:
         for ks, space in self.spacelist:
             srcs = items
             tgt = out
-            try:
-                for k in ks[:-1]:
-                    srcs = [x[k] for x in srcs]
-                    tgt = tgt[k]
-            except:
-                import pdb; pdb.set_trace()
-            try:
-                tgt[ks[-1]] = np.stack([x[ks[-1]] for x in srcs])
-            except:
-                import pdb; pdb.set_trace()
+            # try:
+            for k in ks[:-1]:
+                srcs = [x[k] for x in srcs]
+                tgt = tgt[k]
+            # except:
+            #     import pdb; pdb.set_trace()
+            # try:
+            tgt[ks[-1]] = np.stack([x[ks[-1]] for x in srcs])
+            # except:
+            #     import pdb; pdb.set_trace()
         return out
 
     def get_slices(self, n_total, n_chunks):

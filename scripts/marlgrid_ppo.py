@@ -25,16 +25,27 @@ save_root = os.path.abspath(os.path.expanduser(f'/tmp/marlgrid_ppo_refactor/{run
 num_episodes = int(1e6)
 
 # Config for a cluttered multigrid
+# env_config = {
+ 
+#     'env_class': 'FourRoom',
+#     'grid_size': 9,
+#     'max_steps': 1000,
+#     'clutter_density': 0.0,
+#     'respawn': False,
+#     'ghost_mode': True,
+#     'reward_decay': True, # default true.
+#     'goal_color': 'yellow'
+# }
 env_config = {
  
-    'env_class': 'FourRoom',
-    'grid_size': 9,
+    'env_class': 'ClutteredGoalCycleEnv',
+    'grid_size': 13,
     'max_steps': 1000,
-    'clutter_density': 0.0,
+    'clutter_density': 0.1,
+    'n_bonus_tiles': 3,
     'respawn': False,
     'ghost_mode': True,
-    'reward_decay': True, # default true.
-    'goal_color': 'yellow'
+    'reward_decay': False, # default true.
 }
 
 agent_interface_config = {
@@ -43,6 +54,7 @@ agent_interface_config = {
     'view_offset': 1,
     'view_downsample_mode': 'max',
     'observation_style': 'rich',
+    # 'observe_goal_location': True,
     'prestige_beta': 0.95, # determines the rate at which prestige decays
     'color': 'prestige',
     'spawn_delay': 0,
