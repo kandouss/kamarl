@@ -7,6 +7,45 @@ import numba
 import copy
 import collections.abc
 
+class log_lists:
+    def __init__(self):
+        self.list_dict = {}
+
+    def update(self, d):
+        for k, v in d.items():
+            self.log_value(k, v)
+
+    def __getitem__(self, key):
+        if key in self.list_dict:
+            return self.list_dict[key]
+        else:
+            return []
+
+    def np(self, key):
+        return np.array(self.list_dict[key])
+    
+    def mean(self, key):
+        return np.nanmean(self.list_dict[key], axis=0)
+
+    def var(self, key):
+        return np.nanvar(self.list_dict[key], axis=0)
+
+    def std(self, key):
+        return np.nanstd(self.list_dict[key], axis=0)
+
+    def log_value(self, key, value):
+        if isinstance(value, torch.Tensor):
+            value = value.cpu().detach().numpy()
+        if np.isscalar(value) or (isinstance(value, np.ndarray) and value.ndim==0):
+            value = value.item()
+        self.list_dict.setdefault(key, []).append(value)
+        
+def params_grads(mod):
+    params = {k: v.detach() for k, v in mod.named_parameters()}
+    grads = {k: v.grad if v.grad is not None else torch.zeros_like(params[k]) for k,v in mod.named_parameters()}
+    return params, grads
+
+
 @numba.njit(numba.float32[:](numba.float32[:], numba.float32))
 def discount_rewards(rewards, gamma):
     discounted_rewards = np.zeros_like(rewards)
