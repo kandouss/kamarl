@@ -238,6 +238,17 @@ class PPOLSTM(nn.Module):
         else:
             return pi, v
 
+    def pi(self, X, hx, return_hidden=False):
+        X = self.input_layers(X)
+        hx_cx_new = self.lstm(X, hx, vec_hidden=False)
+
+        pi = torch.distributions.Categorical(logits=self.mlp_pi(hx_cx_new[0]))
+        
+        if return_hidden:
+            return pi, hx_cx_new
+        else:
+            return pi
+
     def pi_v_rec(self, X, hx, act, return_hidden=False, input_dropout=0.0):
         X = self.input_layers(X)
         X = nn.functional.dropout(X, p=input_dropout)

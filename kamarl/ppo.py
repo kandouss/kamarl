@@ -14,20 +14,9 @@ import gym
 from kamarl.modules import ConvNet, SeqLSTM, make_mlp, device_of, PixelDropout
 from kamarl.buffers import RecurrentReplayMemory, init_array_recursive
 from kamarl.agents import Agent
-from kamarl.utils import space_to_dict, dict_to_space, get_module_inputs, chunked_iterable, discount_rewards, discount_rewards_tensor
+from kamarl.utils import space_to_dict, dict_to_space, get_module_inputs, chunked_iterable, discount_rewards, discount_rewards_tensor, update_config_dict
 
 import copy
-
-
-def update_config_dict(base_config, new_config):
-    novel_keys = []
-    updated_config = copy.deepcopy(base_config)
-    for k,v in new_config.items():
-        if k not in base_config:
-            novel_keys.append(k)
-        updated_config[k] = v
-    return updated_config, novel_keys
-        
 
 
 class PPOLSTM(nn.Module):
@@ -161,7 +150,18 @@ class PPOLSTM(nn.Module):
 
     def compute_hidden(self, X):
         return self.lstm(self.input_layers(X))
+    
+    def pi(self, X, hx, return_hidden=False):
+        X = self.input_layers(X)
+        hx_cx_new = self.lstm(X, hx, vec_hidden=False)
+
+        pi = torch.distributions.Categorical(logits=self.mlp_pi(hx_cx_new[0]))
         
+        if return_hidden:
+            return pi, hx_cx_new
+        else:
+            return pi
+
     def pi_v(self, X, hx, return_hidden=False):
         X = self.input_layers(X)
         hx_cx_new = self.lstm(X, hx, vec_hidden=False)

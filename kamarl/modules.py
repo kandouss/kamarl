@@ -241,7 +241,6 @@ class SeqLSTM(nn.RNNCellBase):
         out_shape = (*X.shape[:-1], self.hidden_size)
         while X.dim() < 3:
             X = X.unsqueeze(0)
-
         self.check_forward_input(X[:,0,:])
         
         ## TODO: remove duplicate code here.

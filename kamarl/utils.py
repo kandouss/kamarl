@@ -74,6 +74,15 @@ def update_config(d, u):
             d[k] = v
     return d
 
+def update_config_dict(base_config, new_config):
+    novel_keys = []
+    updated_config = copy.deepcopy(base_config)
+    for k,v in new_config.items():
+        if k not in base_config:
+            novel_keys.append(k)
+        updated_config[k] = v
+    return updated_config, novel_keys
+
 def chunked_iterable(iterable, size):
     it = iter(iterable)
     while True:
