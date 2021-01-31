@@ -267,7 +267,6 @@ class Agent(RLAgentBase):
         modules_dict = torch.load(model_path, map_location=device)
 
         for k,v in modules_dict.items():
-            # v = cls.fill_in_modules(v, getattr(ret, k).state_dict())
             if k == 'optimizer' and metadata['class'] != cls.__name__:
                 print(f"Changed model class from {metadata['class']} to {cls.__name__}. Gonna not load optimizer.")
                 continue
@@ -280,15 +279,6 @@ class Agent(RLAgentBase):
                     if k == 'optimizer':
                         warnings.warn("Failed to load optimizer.")
                     continue
-            # try:
-            #     cls.partial_load_state_dict(getattr(ret, k).state_dict(), v.state_dict())
-            #     # getattr(ret, k).load_state_dict(v.state_dict())
-            # except:
-            #     rsd = getattr(ret, k).state_dict()
-            #     for net_name, net_params in v.state_dict().items():
-            #         print(net_name, tuple(net_params.shape), tuple(rsd[net_name].shape))
-            #     print(f"Error loading {k}")
-            #     import pdb; pdb.set_trace()
         del modules_dict
         return ret
 

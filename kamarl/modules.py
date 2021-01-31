@@ -186,11 +186,13 @@ class DeconvNet(nn.Module):
 @torch.jit.script
 def lstm_forward(X, hx, weight_ih, weight_hh, bias_ih, bias_hh):
     hx = hx.unsqueeze(-2)
-    
-    for k, x in enumerate(X.unbind(-2)):
+    k = 0
+    for x in X.unbind(-2):
         hx_ = torch.stack(torch._VF.lstm_cell( x, hx[...,k,:].unbind(0),
                             weight_ih, weight_hh, bias_ih, bias_hh))
-        hx = torch.cat((hx, hx_.unsqueeze(2)), dim=-2)
+        hx = torch.cat((hx, hx_.unsqueeze(2).contiguous()), dim=2)
+        
+        k += 1
     return hx[:, :, 1:]
 
 
@@ -274,7 +276,6 @@ class SeqLSTM(nn.RNNCellBase):
                     self.check_forward_hidden(X[:,0,:], hx[1], '[1]')
                 except:
                     import pdb; pdb.set_trace()
-
             res = lstm_forward(
                 X, hx,
                 self.weight_ih, self.weight_hh,

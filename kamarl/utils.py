@@ -7,6 +7,12 @@ import numba
 import copy
 import collections.abc
 
+def pd_mode(pd):
+    if isinstance(pd, torch.distributions.Categorical):
+        return torch.argmax(pd.logits, axis=-1)
+    else:
+        raise NotImplementedError
+
 class log_lists:
     def __init__(self):
         self.list_dict = {}

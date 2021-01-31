@@ -14,7 +14,7 @@ import gym
 from kamarl.modules import ConvNet, SeqLSTM, make_mlp, device_of, PixelDropout
 from kamarl.buffers import RecurrentReplayMemory, init_array_recursive
 from kamarl.agents import Agent
-from kamarl.utils import space_to_dict, dict_to_space, get_module_inputs, chunked_iterable, discount_rewards, discount_rewards_tensor, update_config_dict
+from kamarl.utils import space_to_dict, dict_to_space, get_module_inputs, chunked_iterable, discount_rewards, discount_rewards_tensor, update_config_dict, pd_mode
 
 import copy
 
@@ -37,10 +37,13 @@ class BCAgent(Agent):
         #  those defaults.
     }
     save_modules = ['policy', 'optimizer']
-    def __init__(self, expert_agent=None, learning_config={}, model_config={}, metadata={}, train_history=[]):
+    def __init__(self, expert_agent=None, observation_space=None, action_space=None, learning_config={}, model_config={}, metadata={}, train_history=[], counts=None):
+        if expert_agent is not None:
+            observation_space = expert_agent.observation_space
+            action_space = expert_agent.action_space
         super().__init__(
-            observation_space=expert_agent.observation_space,
-            action_space=expert_agent.action_space,
+            observation_space=observation_space,
+            action_space=action_space,
             metadata=metadata,
             train_history=train_history)
 
@@ -52,7 +55,7 @@ class BCAgent(Agent):
         if expert_agent is not None:
             self.expert_agent.training = False
 
-        self.policy = PPOLSTM(self.expert_agent.observation_space, self.expert_agent.action_space, config=model_config)
+        self.policy = PPOLSTM(self.observation_space, self.action_space, config=model_config)
         self.model_config = self.policy.config
         
         # self.track_gradients(self.policy)
@@ -102,10 +105,14 @@ class BCAgent(Agent):
     def reset_info(self):
         if self.expert_agent is not None:
             self.expert_agent.reset_info()
-        self.logged_lengths = []
-        self.logged_rewards = []
-        self.logged_streaks = []
-        self.logged_reward_counts = []
+        self.ep_stats = {
+            'lengths': [],
+            'rewards': [],
+            'streaks': [],
+            'reward_counts': [],
+            'reward_streaks': []
+        }
+        self.ep_stats_hist = copy.deepcopy(self.ep_stats)
 
     def reset_state(self):
         if self.expert_agent is not None:
@@ -151,9 +158,9 @@ class BCAgent(Agent):
             self.policy.parameters(),
             lr = self.learning_config['learning_rate'])
 
-    def action_step(self, X):
+    def action_step(self, X, sampling=True):
         if self.expert_agent is not None:
-            return self.expert_agent.action_step(X)
+            return self.expert_agent.action_step(X, sampling=sampling)
 
         was_training = self.policy.training
         self.policy.eval()
@@ -163,7 +170,7 @@ class BCAgent(Agent):
                 X = {k:v[:,None,...] for k,v in X.items()}
             else:
                 X = X[:,None,...]
-            tmp = self.policy.step(X, self.hx_cx.unbind(-2))
+            tmp = self.policy.step(X, self.hx_cx.unbind(-2), sampling=sampling)
             a, v, logp, hx_cx = [x.squeeze() for x in tmp]
             self.hx_cx = torch.stack(hx_cx.unbind(-2))
         else:
@@ -186,6 +193,19 @@ class BCAgent(Agent):
                 return {k: decollate(v, ix) for k,v in val.items()}
             else:
                 return val[ix]
+
+        still_going = ~np.array(done).astype(bool)
+        rew_ = np.array(rew)*still_going
+        min_streak_rew = 1.0
+
+        try:
+            self.ep_stats['reward_streaks'] = (self.ep_stats['reward_streaks'] + (rew_ >= min_streak_rew))*(rew_ >= 0)
+        except:
+            import pdb; pdb.set_trace()
+        self.ep_stats['reward_counts'] += (rew_>=min_streak_rew) 
+        self.ep_stats['streaks'] = np.maximum(self.ep_stats['streaks'], self.ep_stats['reward_streaks'])
+        self.ep_stats['rewards'] += rew * still_going
+        self.ep_stats['lengths'] += still_going
 
         if self.training:
             save_dict = {
@@ -355,6 +375,9 @@ class BCAgent(Agent):
         self.reset_hidden()
         self.reset_state()
 
+        for k in self.ep_stats.keys():
+            self.ep_stats[k] = np.zeros(n_parallel or 1)
+
         # self.reset_info()
         self.last_val = None
 
@@ -369,16 +392,55 @@ class BCAgent(Agent):
         self.counts['episode_steps'] = 0
 
     def end_episode(self, log=False):
+        
+        if bool(log):
+            info = self.ep_stats
+            self.log(
+                'episode_data',
+                {
+                    'ep_no': self.counts['episodes'],
+                    'update_no': self.counts['updates'],
+                    'step_no': self.counts['steps'],
+
+                    'mean_reward_streak': np.mean(info['streaks']),
+                    'max_reward_streak': np.max(info['streaks']),
+                    'reward_streak_15p': np.quantile(info['streaks'], 0.15),
+                    'reward_streak_85p': np.quantile(info['streaks'], 0.85),
+
+                    'mean_reward': np.mean(info['rewards']),
+                    'ep_return_mean': np.mean(info['rewards']),
+                    'ep_return_15p': np.quantile(info['rewards'], 0.15),
+                    'ep_return_85p': np.quantile(info['rewards'], 0.85),
+                    'ep_return_std': np.std(info['rewards']),
+                    'ep_return_min': np.min(info['rewards']),
+                    'ep_return_max': np.max(info['rewards']),
+
+                    'mean_length': np.mean(info['lengths']),
+
+                    'mean_reward_counts': np.mean(info['reward_counts']),
+                    'reward_counts_15p': np.quantile(info['reward_counts'], 0.15),
+                    'reward_counts_85p': np.quantile(info['reward_counts'], 0.85),
+
+                    'mean_streak_fraction': np.mean(np.array(info['streaks'])/np.array(info['reward_counts']).clip(1)),
+                }
+            )
+
+
         if self.expert_agent is not None:
             self.expert_agent.end_episode(log=False)
+        if self.training:
+            for ep in self.active_episodes:
+                ep.freeze()
+                self.replay_memory.add_episode(ep)
+                self.counts['episodes'] += 1
 
-        for ep in self.active_episodes:
-            ep.freeze()
-            self.replay_memory.add_episode(ep)
-            self.counts['episodes'] += 1
+            if len(self.replay_memory) >= self.learning_config['batch_size']:
+                self.optimize()
+                self.last_update_episode = self.counts['episodes']
 
-        if len(self.replay_memory) >= self.learning_config['batch_size']:
-            self.optimize()
-            self.last_update_episode = self.counts['episodes']
+
+        for k in self.ep_stats.keys():
+            self.ep_stats_hist[k] = np.append(self.ep_stats_hist[k], self.ep_stats[k])
+            self.ep_stats[k] = []
 
         # self.grad_log_sync()

@@ -76,14 +76,13 @@ class EnvStack:
     def __init__(self, env_fns):
         self.envs = [fn() for fn in env_fns]
         self.env_batch_size = len(self.envs)
-
+        
         self.observation_space = self.envs[0].observation_space
         self.action_space = self.envs[0].action_space
 
     def step(self, actions):
         if len(self.envs) != len(actions):
             print("Action length inconsistency")
-            # import pdb; pdb.set_trace()
         return list(zip(*[env.step(action) for env, action in zip(self.envs, actions)]))
 
     def render(self, *args, which=0, **kwargs):

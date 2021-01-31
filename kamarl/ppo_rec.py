@@ -15,7 +15,7 @@ import gym
 from kamarl.modules import ConvNet, DeconvNet, SeqLSTM, make_mlp, device_of
 from kamarl.buffers import RecurrentReplayMemory, init_array_recursive
 from kamarl.agents import Agent
-from kamarl.utils import space_to_dict, dict_to_space, get_module_inputs, chunked_iterable, discount_rewards, discount_rewards_tensor
+from kamarl.utils import space_to_dict, dict_to_space, get_module_inputs, chunked_iterable, discount_rewards, discount_rewards_tensor, pd_mode
 
 from PIL import Image
 import copy
@@ -219,7 +219,9 @@ class PPOLSTM(nn.Module):
         if isinstance(X, dict) and 'obs' in X:
             X = X['obs']
         X_image, X_other = self.process_input(X)
+        # import pdb; pdb.set_trace()
         X = self.conv_layers(X_image)
+        
         if X_other is not None:
             X = torch.cat([X, X_other], dim=-1)
         return self.combined_input_layers(X)
@@ -229,20 +231,28 @@ class PPOLSTM(nn.Module):
         
     def pi_v(self, X, hx, return_hidden=False):
         X = self.input_layers(X)
+        X = nn.functional.dropout(X, p=input_dropout)
         hx_cx_new = self.lstm(X, hx, vec_hidden=False)
 
-        pi = torch.distributions.Categorical(logits=self.mlp_pi(hx_cx_new[0]))
-        v = self.mlp_val(hx_cx_new[0])
+        # Compute policy
+        policy_logits = self.mlp_pi(hx_cx_new[0])
+        pi = torch.distributions.Categorical(logits=policy_logits)
+
+        val = self.mlp_val(hx_cx_new[0])
         if return_hidden:
-            return pi, v, hx_cx_new
+            return pi, val, hx_cx_new
         else:
-            return pi, v
+            return pi, val
 
     def pi(self, X, hx, return_hidden=False):
         X = self.input_layers(X)
+        X = nn.functional.dropout(X, p=input_dropout)
         hx_cx_new = self.lstm(X, hx, vec_hidden=False)
 
-        pi = torch.distributions.Categorical(logits=self.mlp_pi(hx_cx_new[0]))
+        # Compute policy
+        policy_logits = self.mlp_pi(hx_cx_new[0])
+        pi = torch.distributions.Categorical(logits=policy_logits)
+
         
         if return_hidden:
             return pi, hx_cx_new
@@ -252,25 +262,33 @@ class PPOLSTM(nn.Module):
     def pi_v_rec(self, X, hx, act, return_hidden=False, input_dropout=0.0):
         X = self.input_layers(X)
         X = nn.functional.dropout(X, p=input_dropout)
-
         hx_cx_new = self.lstm(X, hx, vec_hidden=False)
 
-        pi = torch.distributions.Categorical(logits=self.mlp_pi(hx_cx_new[0]))
-        v = self.mlp_val(hx_cx_new[0])
-        rec = self.deconv_layers(torch.cat((hx_cx_new[0],F.one_hot(act, self.action_space.n).float()),dim=-1))
-        return pi, v, rec
-
-    def step(self, X, hx=None):
-        X = self.input_layers(X)
-        X, hx = self.lstm(X, hx, vec_hidden=False)
-
-        policy_logits = self.mlp_pi(X)
+        # Compute policy
+        policy_logits = self.mlp_pi(hx_cx_new[0])
         pi = torch.distributions.Categorical(logits=policy_logits)
-        act = pi.sample()
-        logp = pi.log_prob(act)
-        val = self.mlp_val(X)
 
-        return act.cpu().numpy(), val, logp, torch.stack((X, hx))
+        val = self.mlp_val(hx_cx_new[0])
+        rec = self.deconv_layers(torch.cat((hx_cx_new[0],F.one_hot(act, self.action_space.n).float()),dim=-1))
+        return pi, val, rec
+
+    def step(self, X, hx=None, sampling=True):
+        X = self.input_layers(X)
+        hx_cx_new = self.lstm(X, hx, vec_hidden=False)
+
+        # Compute policy
+        policy_logits = self.mlp_pi(hx_cx_new[0])
+        pi = torch.distributions.Categorical(logits=policy_logits)
+        
+        if sampling:
+            act = pi.sample()
+        else:
+            act = pd_mode(pi)
+
+        logp = pi.log_prob(act)
+        val = self.mlp_val(hx_cx_new[0])
+
+        return act.cpu().numpy(), val, logp, hx_cx_new
 
 def parallel_repeat(value, n_parallel=None):
     if n_parallel is None:
@@ -455,7 +473,7 @@ class PPOAEAgent(Agent):
                 weight_decay = self.learning_config['weight_decay']
             )
 
-    def action_step(self, X):
+    def action_step(self, X, sampling=True):
         self.ac.eval()
         last_hx_cx = self.hx_cx.detach().cpu().numpy()
         if self.n_parallel is not None:
@@ -463,11 +481,11 @@ class PPOAEAgent(Agent):
                 X = {k:v[:,None,...] for k,v in X.items()}
             else:
                 X = X[:,None,...]
-            tmp = self.ac.step(X, self.hx_cx.unbind(-2))
+            tmp = self.ac.step(X, self.hx_cx.unbind(-2), sampling=sampling)
             a, v, logp, hx_cx = [x.squeeze() for x in tmp]
             self.hx_cx = torch.stack(hx_cx.unbind(-2))
         else:
-            a, v, logp, self.hx_cx = self.ac.step(X, self.hx_cx)
+            a, v, logp, self.hx_cx = self.ac.step(X, self.hx_cx, sampling=sampling)
 
         self.state = {**self.state,
             'val': v.detach().cpu().numpy(),
@@ -760,7 +778,7 @@ class PPOAEAgent(Agent):
                 for episode in self.replay_memory.episodes:
                     episode.to_tensor(device=device)
 
-                for i in range(hp['num_minibatches']):
+                for i in range(int(hp['num_minibatches'])):
 
                     # If it's time, recompute the advantages and hidden states in the replay buffer to make sure
                     # they don't get too stale.
@@ -840,7 +858,7 @@ class PPOAEAgent(Agent):
                 # If it has, then reset the actor, critic, and optimizer parameters to the backup values saved above.
                 used_backup = False
                 if hp['kl_hard_limit'] is not None:
-                    self.refresh_stale(self.replay_memory.episodes)
+                    self.refresh_stale(self.replay_memory.episodes, parallel=hp['hidden_update_n_parallel'])
                     kl_after = self.check_kl(self.ac, self.sample_replay_buffer(batch_size=512, seq_len=8))
 
                     if kl_after > hp['kl_hard_limit']:
@@ -930,7 +948,7 @@ class PPOAEAgent(Agent):
 
         
         for k in self.ep_stats.keys():
-            self.ep_stats[k] = np.zeros(n_parallel)
+            self.ep_stats[k] = np.zeros(n_parallel or 1)
         # self.episode_reward_streaks = np.zeros(n_parallel) 
         # self.logged_reward_counts.append(np.zeros(n_parallel))
         # self.logged_rewards.append(np.zeros(n_parallel))
